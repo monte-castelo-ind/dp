@@ -343,16 +343,12 @@ function carregarXLSX(){
     document.head.appendChild(s);
   });
 }
-/* Para GRAVAR usamos ExcelJS, não SheetJS: testei os dois e o SheetJS
-   descarta a Tabela1 e as validações de dados ao regravar — as fórmulas da
-   CONFERÊNCIA FOLHA usam Tabela1[[#This Row],[...]] e parariam de funcionar.
-   O ExcelJS preserva tabela, validações, formatos e as quatro abas.      */
-function carregarExcelJS(){
+function carregarZip(){
   return new Promise(function(res,rej){
-    if(window.ExcelJS){ res(); return; }
+    if(window.fflate){ res(); return; }
     var s=document.createElement('script');
-    s.src='https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js';
-    s.onload=res; s.onerror=function(){ rej(new Error('não foi possível carregar a biblioteca de Excel (ExcelJS)')); };
+    s.src='https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js';
+    s.onload=res; s.onerror=function(){ rej(new Error('não foi possível carregar a biblioteca de compactação')); };
     document.head.appendChild(s);
   });
 }
@@ -1056,101 +1052,199 @@ function pintar(){
 }
 
 /* ---------- Excel no formato do fechamento ---------- */
-/* ===== GRAVAÇÃO SOBRE O MODELO =====
-   A planilha do mês anterior é usada como MODELO: abrimos o arquivo dela,
-   trocamos só os dados e salvamos. Assim a Tabela1, as validações, os
-   feriados, as listas de apoio, os formatos e as outras três abas ficam
-   exatamente como estão — nada é recriado.
-   As sete colunas em azul (M a S) são do DP e saem em branco, menos as que
-   o extrato já responde.                                                  */
+/* ===== GRAVAÇÃO CIRÚRGICA NO ARQUIVO DO MÊS ANTERIOR =====
+   Tentei duas bibliotecas para regravar o .xlsx e as duas corromperam a
+   CONFERÊNCIA FOLHA: uma descartava a Tabela1, a outra gerava XML que o
+   Excel recusa e "repara", apagando a aba. O problema é a REGRAVAÇÃO em si.
+   Aqui nada é regravado: o .xlsx é aberto como zip e apenas a aba
+   DADOS BASE tem seu XML editado. As outras três abas, os estilos, a
+   Tabela1, as validações e as fórmulas ficam byte a byte iguais.        */
+
 var COL={ nome:1, admissao:2, salario:3, insal:4, quinq:5, adto:6, vt:7, pensao:8,
           dep14:9, dep:10, psaude:11, premio:12, ferias:13, adiantamento:14,
           consignado:15, comissao:16, iniFerias:17, fimFerias:18, obs:19 };
+var ULTIMA_COL=19;                       // A..S; de U em diante é tabela de apoio
+
+function letraCol(n){
+  var s='';
+  while(n>0){ var r=(n-1)%26; s=String.fromCharCode(65+r)+s; n=Math.floor((n-1)/26); }
+  return s;
+}
+function xmlEsc(s){
+  return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function serialData(ddmmaaaa){
+  var p=String(ddmmaaaa||'').split('/');
+  if(p.length!==3) return null;
+  var d=Date.UTC(parseInt(p[2],10), parseInt(p[1],10)-1, parseInt(p[0],10));
+  if(isNaN(d)) return null;
+  return Math.round((d-Date.UTC(1899,11,30))/86400000);
+}
+function nomeMes(m){
+  var M=['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho',
+         'Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  return M[m-1]||String(m);
+}
+// separa as células de uma <row> em um mapa por coluna, preservando o XML
+function celulasDaLinha(xmlLinha){
+  var mapa={};
+  var re=/<c r="([A-Z]+)(\d+)"([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g, m;
+  while((m=re.exec(xmlLinha))!==null){
+    var letras=m[1], attr=m[3]||'', dentro=(m[4]===undefined?null:m[4]);
+    var n=0;
+    for(var k=0;k<letras.length;k++) n=n*26+(letras.charCodeAt(k)-64);
+    mapa[n]={ letras:letras, attr:attr, dentro:dentro, bruto:m[0] };
+  }
+  return mapa;
+}
+function attrEstilo(attr){
+  var m=String(attr||'').match(/\ss="(\d+)"/);
+  return m?' s="'+m[1]+'"':'';
+}
+// monta uma célula nova mantendo o estilo do modelo
+function celula(ref, estilo, valor, formula, texto){
+  if(formula!=null){
+    return '<c r="'+ref+'"'+estilo+'><f>'+xmlEsc(formula)+'</f>'+
+      (valor!=null&&valor!==''?'<v>'+valor+'</v>':'')+'</c>';
+  }
+  if(valor==null||valor===''){ return '<c r="'+ref+'"'+estilo+'/>'; }
+  if(texto){
+    return '<c r="'+ref+'"'+estilo+' t="inlineStr"><is><t xml:space="preserve">'+
+      xmlEsc(valor)+'</t></is></c>';
+  }
+  return '<c r="'+ref+'"'+estilo+'><v>'+valor+'</v></c>';
+}
 
 window.baixarExcel=function(){
   if(!LINHAS.length){ alert('Nada para exportar.'); return; }
   if(!MODELO){
-    alert('Para sair no formato exato da sua planilha, preciso do arquivo do mês anterior como modelo.\n\n'+
-          'Ele carrega a Tabela1, as validações, os feriados e as outras abas — sem isso a CONFERÊNCIA FOLHA para de funcionar.\n\n'+
+    alert('Para sair no formato exato da sua planilha, preciso do arquivo do mês anterior.\n\n'+
+          'Ele é usado como base: o app edita apenas a aba DADOS BASE e não toca em mais nada.\n\n'+
           'Escolha o Excel do mês anterior na segunda caixa.');
     return;
   }
   var st=document.getElementById('s-xls');
   st.textContent='Gerando…';
-  carregarExcelJS().then(function(){
-    var wb=new ExcelJS.Workbook();
-    return wb.xlsx.load(MODELO.slice(0)).then(function(){ return wb; });
-  }).then(function(wb){
-    var ws=wb.getWorksheet('DADOS BASE');
-    if(!ws) throw new Error('a planilha modelo não tem a aba "DADOS BASE"');
+  carregarZip().then(function(){
+    var zip=fflate.unzipSync(new Uint8Array(MODELO));
+    var dec=new TextDecoder('utf-8'), enc=new TextEncoder();
 
+    // acha o arquivo da aba DADOS BASE pelo workbook e pelos rels
+    var wbx=dec.decode(zip['xl/workbook.xml']);
+    var relx=dec.decode(zip['xl/_rels/workbook.xml.rels']);
+    var rels={};
+    (relx.match(/<Relationship[^>]*>/g)||[]).forEach(function(r){
+      var id=(r.match(/Id="([^"]+)"/)||[])[1];
+      var tgt=(r.match(/Target="([^"]+)"/)||[])[1];
+      if(id&&tgt) rels[id]=tgt.replace(/^\/?xl\//,'');
+    });
+    var alvo=null;
+    (wbx.match(/<sheet[^>]*>/g)||[]).forEach(function(s){
+      var nm=(s.match(/name="([^"]+)"/)||[])[1];
+      var rid=(s.match(/r:id="([^"]+)"/)||[])[1];
+      if(nm==='DADOS BASE' && rid) alvo='xl/'+rels[rid];
+    });
+    if(!alvo || !zip[alvo]) throw new Error('não achei a aba "DADOS BASE" na planilha modelo');
+
+    var xml=dec.decode(zip[alvo]);
     var comp=String(FOLHA.competencia||'').split('/');
     var mes=comp.length===2?parseInt(comp[0],10):1;
     var ano=comp.length===2?parseInt(comp[1],10):new Date().getFullYear();
-    // B1 comanda o PRÊMIO e a CONFERÊNCIA FOLHA: precisa ser a competência nova
-    ws.getCell('B1').value=new Date(Date.UTC(ano,mes-1,1));
+    var serialB1=Math.round((Date.UTC(ano,mes-1,1)-Date.UTC(1899,11,30))/86400000);
 
-    var LINHA0=3;                       // linha 1 título, 2 cabeçalho
-    var antes=ws.rowCount;
-    // quantas linhas de dados existem hoje no modelo
-    var ultima=LINHA0-1;
-    for(var r=LINHA0;r<=antes;r++){
-      var v=ws.getRow(r).getCell(COL.nome).value;
-      if(v!=null && String(v).trim()!=='') ultima=r;
+    // B1: competência nova (comanda o PRÊMIO e a CONFERÊNCIA FOLHA)
+    xml=xml.replace(/<c r="B1"([^>]*?)(?:\/>|>[\s\S]*?<\/c>)/,
+      function(_,attr){ return '<c r="B1"'+attr.replace(/\st="[^"]*"/,'')+'><v>'+serialB1+'</v></c>'; });
+
+    // linha 3 serve de molde para os estilos das colunas A..S
+    var mMolde=xml.match(/<row r="3"[^>]*>[\s\S]*?<\/row>/);
+    if(!mMolde) throw new Error('a planilha modelo não tem a linha 3 na aba DADOS BASE');
+    var molde=celulasDaLinha(mMolde[0]);
+    var estilos={};
+    for(var c=1;c<=ULTIMA_COL;c++) estilos[c]=attrEstilo(molde[c]?molde[c].attr:'');
+
+    // quantas linhas de dados o modelo tem hoje
+    var linhasXml={}, ordem=[];
+    var reRow=/<row r="(\d+)"([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g, mr;
+    while((mr=reRow.exec(xml))!==null){
+      linhasXml[+mr[1]]={ attr:mr[2], dentro:(mr[3]===undefined?'':mr[3]), bruto:mr[0] };
+      ordem.push(+mr[1]);
     }
+    var maxLinha=Math.max.apply(null, ordem);
 
-    LINHAS.forEach(function(x,k){
-      var n=LINHA0+k;
-      var row=ws.getRow(n);
-      // as colunas com fórmula (E, F, L) não são tocadas: já vêm do modelo
-      row.getCell(COL.nome).value=x.nome;
-      row.getCell(COL.admissao).value=dataDe(x.admissao);
-      row.getCell(COL.salario).value=x.salario>0?x.salario:null;
-      row.getCell(COL.insal).value=x.insal>0?x.insal:null;
-      row.getCell(COL.vt).value=x.vt||null;
-      row.getCell(COL.pensao).value=x.pensao>0?x.pensao:null;
-      row.getCell(COL.psaude).value=num(x.psaude)>0?num(x.psaude):null;
-      // colunas do DP: o extrato responde estas duas
-      row.getCell(COL.ferias).value=x.ferias||null;
-      row.getCell(COL.comissao).value=x.comis>0?x.comis:null;
-      // herdadas do mês anterior, quando existirem
-      row.getCell(COL.dep14).value=(x.dep14===''||x.dep14==null)?null:x.dep14;
-      row.getCell(COL.dep).value=(x.dep===''||x.dep==null)?null:x.dep;
-      row.getCell(COL.consignado).value=x.cons>0?x.cons:null;
-      // as demais em azul ficam em branco para o DP preencher
-      row.getCell(COL.iniFerias).value=null;
-      row.getCell(COL.fimFerias).value=null;
+    // reescreve cada linha de dados: colunas A..S com os novos valores,
+    // U em diante (feriados e listas) exatamente como estavam
+    var novasLinhas={};
+    var total=Math.max(LINHAS.length, 0);
+    for(var k=0;k<total;k++){
+      var n=3+k, X=LINHAS[k];
+      var base=linhasXml[n];
+      var apoio='';
+      if(base){
+        var cels=celulasDaLinha(base.dentro);
+        Object.keys(cels).map(Number).sort(function(a,b){ return a-b; }).forEach(function(cn){
+          if(cn>ULTIMA_COL) apoio+=cels[cn].bruto;
+        });
+      }
+      var e=estilos, L=letraCol, out='';
+      out+=celula('A'+n, e[1], X.nome, null, true);
+      out+=celula('B'+n, e[2], serialData(X.admissao));
+      out+=celula('C'+n, e[3], X.salario>0?X.salario:null);
+      out+=celula('D'+n, e[4], X.insal>0?X.insal:null);
+      out+=(X._nq>0
+        ? celula('E'+n, e[5], X.quinq, 'C'+n+'*'+(Math.round(0.04*X._nq*10000)/10000))
+        : celula('E'+n, e[5], null));
+      out+=celula('F'+n, e[6], X.adto, 'C'+n+'*40%');
+      out+=celula('G'+n, e[7], X.vt||null, null, true);
+      out+=celula('H'+n, e[8], X.pensao>0?X.pensao:null);
+      out+=celula('I'+n, e[9], (X.dep14===''||X.dep14==null)?null:X.dep14, null, isNaN(parseFloat(X.dep14)));
+      out+=celula('J'+n, e[10], (X.dep===''||X.dep==null)?null:X.dep, null, isNaN(parseFloat(X.dep)));
+      out+=celula('K'+n, e[11], num(X.psaude)>0?num(X.psaude):null);
+      // o < e o > vão crus: o xmlEsc dentro de celula() já escapa
+      out+=celula('L'+n, e[12], (X.premio==='SIM'?null:0),
+                  'IF(MONTH(B'+n+')<>MONTH($B$1),0,"SIM")');
+      out+=celula('M'+n, e[13], X.ferias||null, null, true);
+      out+=celula('N'+n, e[14], X.adi, 'SUM(F'+n+'-O'+n+')');
+      out+=celula('O'+n, e[15], X.cons>0?X.cons:null);
+      out+=celula('P'+n, e[16], X.comis>0?X.comis:null);
+      out+=celula('Q'+n, e[17], null);
+      out+=celula('R'+n, e[18], null);
       var obs=[];
-      if(x._novo) obs.push('novo no mês');
-      if(x._semAdiAnt && x.adi>0) obs.push('sem adiantamento no mês anterior');
-      if(x._ambiguo) obs.push('conferir nome');
-      if(!(x.salario>0)) obs.push('sem salário no extrato');
-      row.getCell(COL.obs).value=obs.length?obs.join(' · '):null;
-      // E, F e L: garante a fórmula na linha certa, mantendo o estilo
-      garantirFormula(row, COL.quinq, 'C'+n+'*'+(Math.round(0.04*(x._nq||0)*10000)/10000), x.quinq, (x._nq||0)>0);
-      garantirFormula(row, COL.adto, 'C'+n+'*40%', x.adto, true);
-      garantirFormula(row, COL.premio, 'IF(MONTH(B'+n+')<>MONTH($B$1),0,"SIM")', null, true);
-      // N: adiantamento é do DP, mas a fórmula do modelo ajuda
-      garantirFormula(row, COL.adiantamento, 'SUM(F'+n+'-O'+n+')', x.adi, true);
-      row.commit();
+      if(X._novo) obs.push('novo no mês');
+      if(X._semAdiAnt && X.adi>0) obs.push('sem adiantamento no mês anterior');
+      if(X._ambiguo) obs.push('conferir nome');
+      if(!(X.salario>0)) obs.push('sem salário no extrato');
+      out+=celula('S'+n, e[19], obs.length?obs.join(' · '):null, null, true);
+      var attrLinha=base?base.attr:(linhasXml[3]?linhasXml[3].attr:' spans="1:27"');
+      novasLinhas[n]='<row r="'+n+'"'+attrLinha+'>'+out+apoio+'</row>';
+    }
+    // sobra do mês anterior: limpa A..S, preserva as colunas de apoio
+    for(var n2=3+total; n2<=maxLinha; n2++){
+      var b2=linhasXml[n2];
+      if(!b2) continue;
+      var cels2=celulasDaLinha(b2.dentro), apoio2='';
+      Object.keys(cels2).map(Number).sort(function(a,b){ return a-b; }).forEach(function(cn){
+        if(cn>ULTIMA_COL) apoio2+=cels2[cn].bruto;
+      });
+      var vazio='';
+      for(var c2=1;c2<=ULTIMA_COL;c2++) vazio+=celula(letraCol(c2)+n2, estilos[c2], null);
+      novasLinhas[n2]='<row r="'+n2+'"'+b2.attr+'>'+vazio+apoio2+'</row>';
+    }
+    // troca as linhas alteradas, uma a uma, sem tocar no resto do XML
+    Object.keys(novasLinhas).forEach(function(n3){
+      var antiga=linhasXml[+n3];
+      if(antiga) xml=xml.replace(antiga.bruto, novasLinhas[n3]);
+      else {
+        // linha que não existia: entra antes do fim do sheetData
+        xml=xml.replace('</sheetData>', novasLinhas[n3]+'</sheetData>');
+      }
     });
 
-    // sobra de gente do mês anterior: limpa os dados, preserva o formato
-    var fim=LINHA0+LINHAS.length;
-    for(var r2=fim;r2<=ultima;r2++){
-      var rw=ws.getRow(r2);
-      for(var c=1;c<=COL.obs;c++){
-        var cel=rw.getCell(c);
-        if(cel.value!=null && !(cel.value&&cel.value.formula)) cel.value=null;
-      }
-      rw.commit();
-    }
-
-    return wb.xlsx.writeBuffer();
-  }).then(function(buf){
-    var comp=String(FOLHA.competencia||'').split('/');
-    var nome='Planilha_Fechamento_'+(comp.length===2?nomeMes(parseInt(comp[0],10))+'_'+comp[1]:'novo')+'.xlsx';
-    var blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    zip[alvo]=enc.encode(xml);
+    var saida=fflate.zipSync(zip,{level:6});
+    var nome='Planilha_Fechamento_'+nomeMes(mes)+'_'+ano+'.xlsx';
+    var blob=new Blob([saida],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
     var a=document.createElement('a');
     a.href=URL.createObjectURL(blob); a.download=nome; a.click();
     st.innerHTML='<strong style="color:var(--green)">✓ gerado sobre o modelo</strong>';
@@ -1161,23 +1255,6 @@ window.baixarExcel=function(){
     alert('Erro ao gerar: '+(e.message||e));
   });
 };
-// mantém o estilo da célula e repõe a fórmula na linha correta
-function garantirFormula(row, col, formula, valor, usar){
-  var cel=row.getCell(col);
-  if(!usar){ cel.value=null; return; }
-  cel.value={ formula:formula, result:(valor==null?undefined:valor) };
-}
-function dataDe(ddmmaaaa){
-  var p=String(ddmmaaaa||'').split('/');
-  if(p.length!==3) return null;
-  var d=new Date(Date.UTC(parseInt(p[2],10), parseInt(p[1],10)-1, parseInt(p[0],10)));
-  return isNaN(d.getTime())?null:d;
-}
-function nomeMes(m){
-  var M=['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho',
-         'Agosto','Setembro','Outubro','Novembro','Dezembro'];
-  return M[m-1]||String(m);
-}
 
 /* ---------- sessão ---------- */
 function negar(msg){
