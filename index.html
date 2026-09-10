@@ -1283,6 +1283,82 @@ window.baixarExcel=function(){
       function(_,c1,r1,c2){ return '<dimension ref="'+c1+r1+':'+c2+ultimaUsada+'"/>'; });
 
     zip[alvo]=enc.encode(xml);
+
+    /* ===== HORAS NA CONFERÊNCIA FOLHA =====
+       As colunas de hora ficam nessa aba, não na DADOS BASE, e guardam
+       FRAÇÃO DE DIA — as fórmulas fazem ROUND(P3*24,2) para voltar a horas.
+       Então 36:28 é gravado como 36,4667/24 = 1,519444.               */
+    var xmlC=null, alvoC=null;
+    (wbx.match(/<sheet[^>]*>/g)||[]).forEach(function(s){
+      var nm=(s.match(/name="([^"]+)"/)||[])[1];
+      var rid=(s.match(/r:id="([^"]+)"/)||[])[1];
+      if(nm && nm.indexOf('CONFER')===0 && rid) alvoC='xl/'+rels[rid];
+    });
+    if(alvoC && zip[alvoC]){
+      xmlC=dec.decode(zip[alvoC]);
+      var COLH={ faltas:14, he50:16, he100:18, noturno:20 };   // N, P, R, T
+      var moldeC=null;
+      var mm3=xmlC.match(/<row r="3"[^>]*>[\s\S]*?<\/row>/);
+      if(mm3) moldeC=celulasDaLinha(mm3[0]);
+      var estC={};
+      Object.keys(COLH).forEach(function(k){
+        var c=COLH[k];
+        estC[c]=attrEstilo(moldeC&&moldeC[c]?moldeC[c].attr:'');
+      });
+      var linhasC={};
+      var reRC=/<row r="(\d+)"([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g, mrc;
+      while((mrc=reRC.exec(xmlC))!==null){
+        linhasC[+mrc[1]]={ attr:mrc[2], dentro:(mrc[3]===undefined?'':mrc[3]), bruto:mrc[0] };
+      }
+      var trocasC={};
+      for(var kc=0;kc<total;kc++){
+        var nc=3+kc, XC=LINHAS[kc], baseC=linhasC[nc];
+        if(!baseC) continue;
+        var celsC=celulasDaLinha(baseC.dentro);
+        var horas={};
+        horas[COLH.faltas]=XC.faltas;
+        horas[COLH.he50]=XC.he50;
+        horas[COLH.he100]=XC.he100;
+        horas[COLH.noturno]=XC.noturno;
+        var novoC='';
+        Object.keys(celsC).map(Number).sort(function(a,b){ return a-b; }).forEach(function(cn){
+          if(horas[cn]!==undefined){
+            var hv=num(horas[cn]);
+            var est=attrEstilo(celsC[cn].attr) || estC[cn];
+            novoC+= hv>0
+              ? '<c r="'+letraCol(cn)+nc+'"'+est+'><v>'+(Math.round(hv/24*100000000)/100000000)+'</v></c>'
+              : '<c r="'+letraCol(cn)+nc+'"'+est+'/>';
+          } else {
+            novoC+=celsC[cn].bruto;
+          }
+        });
+        // colunas de hora que não existiam na linha
+        Object.keys(horas).map(Number).forEach(function(cn){
+          if(celsC[cn]) return;
+          var hv=num(horas[cn]);
+          if(!(hv>0)) return;
+          novoC+='<c r="'+letraCol(cn)+nc+'"'+estC[cn]+'><v>'+(Math.round(hv/24*100000000)/100000000)+'</v></c>';
+        });
+        trocasC[nc]='<row r="'+nc+'"'+baseC.attr+'>'+novoC+'</row>';
+      }
+      Object.keys(trocasC).forEach(function(nc){
+        xmlC=xmlC.replace(linhasC[+nc].bruto, trocasC[nc]);
+      });
+      zip[alvoC]=enc.encode(xmlC);
+    }
+
+    /* O calcChain.xml é o cache da ordem de cálculo. Com as fórmulas
+       mudando, ele fica velho e o Excel "remove registros" — era o reparo
+       que sobrou. Apagando, o Excel reconstrói sozinho e sem reclamar.  */
+    if(zip['xl/calcChain.xml']){
+      delete zip['xl/calcChain.xml'];
+      var ct=dec.decode(zip['[Content_Types].xml']);
+      ct=ct.replace(/<Override PartName="\/xl\/calcChain\.xml"[^>]*\/>/,'');
+      zip['[Content_Types].xml']=enc.encode(ct);
+      var wr=dec.decode(zip['xl/_rels/workbook.xml.rels']);
+      wr=wr.replace(/<Relationship[^>]*calcChain\.xml"[^>]*\/>/,'');
+      zip['xl/_rels/workbook.xml.rels']=enc.encode(wr);
+    }
     var saida=fflate.zipSync(zip,{level:6});
     var nome='Planilha_Fechamento_'+nomeMes(mes)+'_'+ano+'.xlsx';
     var blob=new Blob([saida],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
