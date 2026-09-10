@@ -960,10 +960,26 @@ window.montar=function(){
       premio:(mesAdmissao(f.admissao)===ref.getMonth()+1 ? 'SIM' : 0),
       ferias:ferias?'sim':'', adi:adi, cons:cons, comis:comis,
       _novo:!A, _score:par.score, _ambiguo:par.ambiguo, _pctInsal:pI, _nq:nq, _herdado:!!A,
+      _par:(A?A.nome:''),
       _semAdiAnt:(A && A.adiAnt===0 && num(A.adtoAnt)>0), _adiAnt:(A?A.adiAnt:null),
       _nq:nq,
       _situacao:f.situacao||'', _cc:f.ccusto||'' };
-  }).sort(function(a,b){ return String(a.nome).localeCompare(String(b.nome),'pt-BR'); });
+  });
+  /* A ORDEM NÃO PODE SER ALFABÉTICA. A CONFERÊNCIA FOLHA tem os nomes como
+     texto fixo e as fórmulas casam por número de linha ('DADOS BASE'!C3 com
+     a linha 3 dela). Ordenar alfabeticamente colocava cada pessoa na linha de
+     outra — e cada um era calculado com o salário do vizinho.
+     Então a ordem do mês anterior é mantida e os novos entram no fim.    */
+  if(ants.length){
+    var pos={};
+    ants.forEach(function(a,i){ pos[a.nome]=i; });
+    LINHAS.forEach(function(x,i){
+      x._ordem = (x._par && pos[x._par]!==undefined) ? pos[x._par] : (1e6+i);
+    });
+    LINHAS.sort(function(a,b){ return a._ordem-b._ordem; });
+  } else {
+    LINHAS.sort(function(a,b){ return String(a.nome).localeCompare(String(b.nome),'pt-BR'); });
+  }
 
   btn.disabled=false;
   pintar();
@@ -1147,6 +1163,19 @@ window.baixarExcel=function(){
     });
     if(!alvo || !zip[alvo]) throw new Error('não achei a aba "DADOS BASE" na planilha modelo');
 
+    /* Quantas pessoas cabem: a Tabela1 da CONFERÊNCIA FOLHA vai até uma
+       linha fixa (A2:AX162 = 160 pessoas). Passar disso deixa a pessoa fora
+       de todo o cálculo e ainda atropela a tabelinha FILHO/VALOR, que fica
+       logo abaixo. Então o limite sai do próprio arquivo.               */
+    var limiteLinha=0;
+    Object.keys(zip).forEach(function(nome){
+      if(!/^xl\/tables\/table[0-9]+\.xml$/.test(nome)) return;
+      var t=dec.decode(zip[nome]);
+      var mr=t.match(/ref="[A-Z]+\d+:[A-Z]+(\d+)"/);
+      if(mr){ var fim=parseInt(mr[1],10); if(fim>limiteLinha) limiteLinha=fim; }
+    });
+    var maxPessoas = limiteLinha>3 ? (limiteLinha-2) : LINHAS.length;
+
     var xml=dec.decode(zip[alvo]);
     var comp=String(FOLHA.competencia||'').split('/');
     var mes=comp.length===2?parseInt(comp[0],10):1;
@@ -1176,7 +1205,8 @@ window.baixarExcel=function(){
     // reescreve cada linha de dados: colunas A..S com os novos valores,
     // U em diante (feriados e listas) exatamente como estavam
     var novasLinhas={};
-    var total=Math.max(LINHAS.length, 0);
+    var total=Math.min(LINHAS.length, maxPessoas);
+    var sobraram=LINHAS.length-total;
     for(var k=0;k<total;k++){
       var n=3+k, X=LINHAS[k];
       var base=linhasXml[n];
@@ -1219,11 +1249,16 @@ window.baixarExcel=function(){
       var attrLinha=base?base.attr:(linhasXml[3]?linhasXml[3].attr:' spans="1:27"');
       novasLinhas[n]='<row r="'+n+'"'+attrLinha+'>'+out+apoio+'</row>';
     }
-    // sobra do mês anterior: limpa A..S, preserva as colunas de apoio
+    /* Sobra do mês anterior: limpa SÓ as linhas que tinham pessoa (nome na
+       coluna A). Zerar tudo apagava a tabelinha FILHO/VALOR, que fica logo
+       abaixo dos dados e não é gente.                                    */
     for(var n2=3+total; n2<=maxLinha; n2++){
       var b2=linhasXml[n2];
       if(!b2) continue;
-      var cels2=celulasDaLinha(b2.dentro), apoio2='';
+      var cels2=celulasDaLinha(b2.dentro);
+      var tinhaNome=!!(cels2[1] && cels2[1].dentro && /<v>|<is>/.test(cels2[1].dentro));
+      if(!tinhaNome) continue;         // não é linha de pessoa: não toca
+      var apoio2='';
       Object.keys(cels2).map(Number).sort(function(a,b){ return a-b; }).forEach(function(cn){
         if(cn>ULTIMA_COL) apoio2+=cels2[cn].bruto;
       });
@@ -1241,12 +1276,26 @@ window.baixarExcel=function(){
       }
     });
 
+    // dimension desatualizado faz o Excel "reparar" o arquivo e a planilha
+    // fica instável — minimizar e restaurar trava a janela
+    var ultimaUsada=Math.max(maxLinha, 2+total);
+    xml=xml.replace(/<dimension ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"\/>/,
+      function(_,c1,r1,c2){ return '<dimension ref="'+c1+r1+':'+c2+ultimaUsada+'"/>'; });
+
     zip[alvo]=enc.encode(xml);
     var saida=fflate.zipSync(zip,{level:6});
     var nome='Planilha_Fechamento_'+nomeMes(mes)+'_'+ano+'.xlsx';
     var blob=new Blob([saida],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
     var a=document.createElement('a');
     a.href=URL.createObjectURL(blob); a.download=nome; a.click();
+    if(sobraram>0){
+      alert('⚠ Sua planilha cabe '+maxPessoas+' pessoas (a Tabela1 vai até a linha '+limiteLinha+').\n\n'+
+        sobraram+' pessoa(s) ficaram de fora:\n'+
+        LINHAS.slice(total).slice(0,8).map(function(x){ return '· '+x.nome; }).join('\n')+
+        (sobraram>8?'\n...':'')+
+        '\n\nPara caber todos: no Excel, clique na Tabela1 → Design da Tabela → Redimensionar Tabela, '+
+        'e estenda até a linha '+(2+LINHAS.length)+'. Depois mande a planilha de novo.');
+    }
     st.innerHTML='<strong style="color:var(--green)">✓ gerado sobre o modelo</strong>';
     setTimeout(function(){ if(ANTERIOR) st.innerHTML='<strong style="color:var(--green)">✓ '+esc(ANTERIOR.aba)+'</strong> · '+ANTERIOR.pessoas.length+' pessoas'; },3500);
   }).catch(function(e){
