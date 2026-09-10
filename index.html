@@ -217,6 +217,9 @@ tbody tr:hover .stk{background:var(--card-2)}
         <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:pointer;padding-top:14px">
           <input type="checkbox" id="c-contr" onchange="montar()" style="width:16px;height:16px;accent-color:var(--primary)">
           <span>Incluir pró-labore (diretores)</span></label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:pointer;padding-top:14px">
+          <input type="checkbox" id="c-dem" onchange="montar()" style="width:16px;height:16px;accent-color:var(--amber)">
+          <span>Incluir demitidos</span></label>
         <button class="btn btn-sm" id="b-excel" onclick="baixarExcel()" disabled style="margin-left:auto">⤓ Baixar Excel</button>
       </div>
 
@@ -925,9 +928,19 @@ window.montar=function(){
   /* A planilha de fechamento não inclui os diretores (pró-labore): eles
      entram no extrato como "Contr." e não recebem adiantamento. */
   var incContr=!!(document.getElementById('c-contr')||{}).checked;
+  var incDem=!!(document.getElementById('c-dem')||{}).checked;
+  /* Demitido não entra no fechamento: ele não recebe adiantamento no mês
+     seguinte. São 20 pessoas em agosto — e 180 empregados menos 20 dá
+     exatamente as 160 que a planilha tem. */
   var pessoas=FOLHA.funcionarios.filter(function(f){
-    return incContr || f.tipo_registro!=='contribuinte';
+    if(!incContr && f.tipo_registro==='contribuinte') return false;
+    if(!incDem && String(f.situacao||'').toUpperCase().indexOf('DEMITIDO')>=0) return false;
+    return true;
   });
+  var nDemitidos=FOLHA.funcionarios.filter(function(f){
+    return f.tipo_registro!=='contribuinte' &&
+           String(f.situacao||'').toUpperCase().indexOf('DEMITIDO')>=0;
+  }).length;
 
   var PARES=ants.length? casarNomes(pessoas, ants) : {};
   LINHAS=pessoas.map(function(f,_i){
@@ -1001,6 +1014,8 @@ function pintar(){
   ].join('');
 
   var av='';
+  if(nDemitidos>0 && !(document.getElementById('c-dem')||{}).checked)
+    av+='<div class="alert a-ok">✓ '+nDemitidos+' demitido(s) fora do fechamento — eles não recebem adiantamento no mês seguinte.</div>';
   if(!ANTERIOR) av+='<div class="alert a-warn">⚠ Sem a planilha do mês anterior: <strong>dependentes, prêmio e parcela do consignado saem vazios</strong>. O adiantamento fica igual ao ADTO, sem descontar parcela.</div>';
   if(novos.length && ANTERIOR) av+='<div class="alert a-info">◇ '+novos.length+' pessoa(s) não estavam no fechamento anterior. As colunas herdadas ficam vazias para você preencher: '+
     esc(novos.slice(0,4).map(function(x){ return x.nome; }).join(', '))+(novos.length>4?'…':'')+'</div>';
@@ -1296,7 +1311,14 @@ window.baixarExcel=function(){
     });
     if(alvoC && zip[alvoC]){
       xmlC=dec.decode(zip[alvoC]);
+      /* O nome também vai aqui. É texto fixo nesta aba e as fórmulas casam
+         por linha ('DADOS BASE'!C3 com a linha 3). Sem reescrever, qualquer
+         admissão ou demissão desloca a lista e cada pessoa passa a ser
+         calculada com o salário de outra — foi o que aconteceu ao tirar os
+         20 demitidos: o alinhamento caiu de 160 para 31.               */
       var COLH={ faltas:14, he50:16, he100:18, noturno:20 };   // N, P, R, T
+      var COL_NOME=1;
+      var horasCols={}; Object.keys(COLH).forEach(function(k){ horasCols[COLH[k]]=1; });
       var moldeC=null;
       var mm3=xmlC.match(/<row r="3"[^>]*>[\s\S]*?<\/row>/);
       if(mm3) moldeC=celulasDaLinha(mm3[0]);
@@ -1305,6 +1327,7 @@ window.baixarExcel=function(){
         var c=COLH[k];
         estC[c]=attrEstilo(moldeC&&moldeC[c]?moldeC[c].attr:'');
       });
+      estC[COL_NOME]=attrEstilo(moldeC&&moldeC[COL_NOME]?moldeC[COL_NOME].attr:'');
       var linhasC={};
       var reRC=/<row r="(\d+)"([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g, mrc;
       while((mrc=reRC.exec(xmlC))!==null){
@@ -1322,6 +1345,11 @@ window.baixarExcel=function(){
         horas[COLH.noturno]=XC.noturno;
         var novoC='';
         Object.keys(celsC).map(Number).sort(function(a,b){ return a-b; }).forEach(function(cn){
+          if(cn===COL_NOME){
+            novoC+='<c r="A'+nc+'"'+attrEstilo(celsC[cn].attr)+
+              ' t="inlineStr"><is><t xml:space="preserve">'+xmlEsc(XC.nome)+'</t></is></c>';
+            return;
+          }
           if(horas[cn]!==undefined){
             var hv=num(horas[cn]);
             var est=attrEstilo(celsC[cn].attr) || estC[cn];
@@ -1332,6 +1360,10 @@ window.baixarExcel=function(){
             novoC+=celsC[cn].bruto;
           }
         });
+        if(!celsC[COL_NOME]){
+          novoC='<c r="A'+nc+'"'+(estC[COL_NOME]||'')+
+            ' t="inlineStr"><is><t xml:space="preserve">'+xmlEsc(XC.nome)+'</t></is></c>'+novoC;
+        }
         // colunas de hora que não existiam na linha
         Object.keys(horas).map(Number).forEach(function(cn){
           if(celsC[cn]) return;
@@ -1340,6 +1372,21 @@ window.baixarExcel=function(){
           novoC+='<c r="'+letraCol(cn)+nc+'"'+estC[cn]+'><v>'+(Math.round(hv/24*100000000)/100000000)+'</v></c>';
         });
         trocasC[nc]='<row r="'+nc+'"'+baseC.attr+'>'+novoC+'</row>';
+      }
+      // sobra: apaga nome e horas, sem tocar em linhas de total (que têm fórmula)
+      for(var ns=3+total; ns<=limiteLinha; ns++){
+        var bs=linhasC[ns]; if(!bs) continue;
+        var cs=celulasDaLinha(bs.dentro);
+        var temFormula=Object.keys(cs).some(function(cn){
+          return cs[cn].dentro && cs[cn].dentro.indexOf('<f')>=0 && cn<=2;
+        });
+        if(temFormula) continue;
+        var lim='';
+        Object.keys(cs).map(Number).sort(function(a,b){ return a-b; }).forEach(function(cn){
+          if(cn===COL_NOME || horasCols[cn]) lim+='<c r="'+letraCol(cn)+ns+'"'+attrEstilo(cs[cn].attr)+'/>';
+          else lim+=cs[cn].bruto;
+        });
+        trocasC[ns]='<row r="'+ns+'"'+bs.attr+'>'+lim+'</row>';
       }
       Object.keys(trocasC).forEach(function(nc){
         xmlC=xmlC.replace(linhasC[+nc].bruto, trocasC[nc]);
