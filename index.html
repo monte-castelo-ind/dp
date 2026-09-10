@@ -755,7 +755,36 @@ window.lerPDF=function(input){
       if(!d.competencia || !d.funcionarios.length){
         st.textContent='';
         document.getElementById('d-pdf').classList.remove('tem');
-        alert('Não reconheci este PDF como o Extrato Mensal.\n\nConfira se é o relatório certo, com camada de texto (não escaneado).');
+        /* Diagnóstico em vez de recusa seca: sem isto não há como saber se o
+           PDF é outro relatório, se está escaneado ou se o layout mudou. */
+        var txt=linhas.join('\n');
+        var nLinhas=linhas.length;
+        var temTitulo=/EXTRATO MENSAL/i.test(txt);
+        var temEmpr=(txt.match(/^\s*Empr\.?:/gm)||[]).length;
+        var temCompet=/Compet[eê]ncia:/i.test(txt);
+        var temCPF=/\d{3}\.\d{3}\.\d{3}-\d{2}/.test(txt);
+        var pista;
+        if(!nLinhas || !txt.trim())
+          pista='O PDF não tem texto — parece escaneado, e precisaria de OCR.';
+        else if(!temTitulo)
+          pista='Não achei o título "EXTRATO MENSAL". Este parece ser outro relatório da contabilidade.';
+        else if(!temCompet)
+          pista='Achei o título mas não a linha "Competência:".';
+        else if(!temEmpr)
+          pista='Achei o cabeçalho mas nenhum registro "Empr.:" — pode ser só a parte de resumos, sem as páginas dos funcionários.';
+        else
+          pista='Li '+temEmpr+' registro(s) mas não consegui interpretar nenhum. O layout do relatório pode ter mudado.';
+        var amostra=linhas.slice(0,3).map(function(l){ return String(l).trim().slice(0,60); })
+          .filter(Boolean).join(' | ');
+        alert('Não reconheci este PDF como o Extrato Mensal.\n\n'+pista+
+          '\n\n— o que eu encontrei —\n'+
+          'linhas de texto: '+nLinhas+'\n'+
+          'título EXTRATO MENSAL: '+(temTitulo?'sim':'não')+'\n'+
+          'linha Competência: '+(temCompet?'sim':'não')+'\n'+
+          'registros Empr.: '+temEmpr+'\n'+
+          'CPF no texto: '+(temCPF?'sim':'não')+'\n'+
+          (amostra?'\ninício do arquivo:\n'+amostra:''));
+        console.log('diagnóstico do PDF:', { nLinhas:nLinhas, temTitulo:temTitulo, temCompet:temCompet, temEmpr:temEmpr, primeiras:linhas.slice(0,10) });
         return;
       }
       var ruins=conferir(d);
