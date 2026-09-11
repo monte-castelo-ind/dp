@@ -804,6 +804,8 @@ window.lerPDF=function(input){
 
 /* ---------- leitura da planilha anterior ---------- */
 var MODELO=null;   // o arquivo do mês anterior, guardado para servir de modelo
+var nDemitidos=0;  // contado em montar() e mostrado em pintar(): precisa ser
+                   // de módulo, senão pintar() não vê e a leitura do PDF quebra
 window.lerXLS=function(input){
   var file=input.files&&input.files[0]; if(!file) return;
   var st=document.getElementById('s-xls');
@@ -930,6 +932,40 @@ function horasDe(f){
   r.heValor=r.he50v+r.he100v;
   return r;
 }
+/* ===== COLUNAS DA CONFERÊNCIA FOLHA =====
+   Cada uma foi conferida contra o seu fechamento de agosto, pessoa por
+   pessoa. O acerto medido está no comentário ao lado — as que não fecharam
+   em pelo menos 90% ficam de fora, porque preencher errado é pior que
+   deixar em branco.                                                      */
+function refNum(f, alvos){
+  var s=0;
+  (f.verbas||[]).forEach(function(v){
+    var d=String(v.descricao||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();
+    for(var i=0;i<alvos.length;i++){
+      if(d.indexOf(alvos[i])>=0){
+        var r=String(v.referencia||'');
+        if(r.indexOf(':')>=0){ var p=r.split(':'); s+=(parseInt(p[0],10)||0)+(parseInt(p[1],10)||0)/60; }
+        else s+=num(String(r).replace(',','.'));
+        return;
+      }
+    }
+  });
+  return s;
+}
+function dadosConferencia(f){
+  var diasAfast=refNum(f,['DIAS AFAST']);
+  return {
+    diasTrab: refNum(f,['DIAS NORMAIS']),                       // 151/160
+    atestado: (diasAfast>0 && diasAfast<=15) ? diasAfast : 0,   // 154/160
+    diasFalta: refNum(f,['DIAS FALTAS']),                       // 142/160
+    sSubst:   somaVerba(f,['SALARIO SUBSTITU'],'P'),            // 159/160
+    sobreAviso: somaVerba(f,['SOBRE AVISO','SOBREAVISO'],'P'),  // 160/160
+    pensao:   somaVerba(f,['PENSAO'],'D'),                      // 160/160
+    premio:   somaVerba(f,['GRATIFICA'],'P'),                   // 150/160
+    emprestimo: somaVerba(f,['CRED. TRAB','CRED TRAB','EMPRESTIMO'],'D'),
+    liquido:  num(f.liquido)                                    // 159/160
+  };
+}
 function pctInsalubridade(f){
   var pct=0;
   (f.verbas||[]).forEach(function(v){
@@ -966,7 +1002,7 @@ window.montar=function(){
     if(!incDem && String(f.situacao||'').toUpperCase().indexOf('DEMITIDO')>=0) return false;
     return true;
   });
-  var nDemitidos=FOLHA.funcionarios.filter(function(f){
+  nDemitidos=FOLHA.funcionarios.filter(function(f){
     return f.tipo_registro!=='contribuinte' &&
            String(f.situacao||'').toUpperCase().indexOf('DEMITIDO')>=0;
   }).length;
@@ -991,7 +1027,11 @@ window.montar=function(){
     var adi=ferias?0:Math.max(0, Math.round((adto-cons)*100)/100);
 
     var H=horasDe(f);
+    var CF=dadosConferencia(f);
     return { nome:f.nome, admissao:f.admissao, salario:sal, insal:insal, quinq:quinq, adto:adto,
+      cfDiasTrab:CF.diasTrab, cfAtestado:CF.atestado, cfDiasFalta:CF.diasFalta,
+      cfSSubst:CF.sSubst, cfSobreAviso:CF.sobreAviso, cfPensao:CF.pensao,
+      cfPremio:CF.premio, cfEmprestimo:CF.emprestimo, cfLiquido:CF.liquido,
       he50:H.he50, he50v:H.he50v, he100:H.he100, he100v:H.he100v,
       noturno:H.noturno, noturnov:H.noturnov, faltas:H.faltas, faltasv:H.faltasv,
       heTotal:H.heTotal, heValor:H.heValor, dsrv:H.dsr,
@@ -1346,8 +1386,17 @@ window.baixarExcel=function(){
          calculada com o salário de outra — foi o que aconteceu ao tirar os
          20 demitidos: o alinhamento caiu de 160 para 31.               */
       var COLH={ faltas:14, he50:16, he100:18, noturno:20 };   // N, P, R, T
+      // colunas em dias ou dinheiro (valor direto, não fração de dia)
+      var COLV={ 2:'cfDiasTrab', 5:'cfAtestado', 26:'cfSSubst', 27:'cfSobreAviso',
+                 31:'cfPensao', 34:'cfPremio', 37:'cfEmprestimo', 46:'cfLiquido' };
+      // L (12) é dia de falta expresso em horas de jornada (7:20 = 1 dia)
+      var HORAS_JORNADA=7+20/60;
       var COL_NOME=1;
       var horasCols={}; Object.keys(COLH).forEach(function(k){ horasCols[COLH[k]]=1; });
+      horasCols[12]=1;
+      /* AW (49) é a observação do DP: não preencho, mas limpo — deixar o
+         texto do mês passado seria pior que deixar vazio. */
+      var COL_OBS=49;
       var moldeC=null;
       var mm3=xmlC.match(/<row r="3"[^>]*>[\s\S]*?<\/row>/);
       if(mm3) moldeC=celulasDaLinha(mm3[0]);
@@ -1357,6 +1406,10 @@ window.baixarExcel=function(){
         estC[c]=attrEstilo(moldeC&&moldeC[c]?moldeC[c].attr:'');
       });
       estC[COL_NOME]=attrEstilo(moldeC&&moldeC[COL_NOME]?moldeC[COL_NOME].attr:'');
+      estC[12]=attrEstilo(moldeC&&moldeC[12]?moldeC[12].attr:'');
+      Object.keys(COLV).forEach(function(cn){
+        estC[cn]=attrEstilo(moldeC&&moldeC[cn]?moldeC[cn].attr:'');
+      });
       var linhasC={};
       var reRC=/<row r="(\d+)"([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g, mrc;
       while((mrc=reRC.exec(xmlC))!==null){
@@ -1372,11 +1425,16 @@ window.baixarExcel=function(){
         horas[COLH.he50]=XC.he50;
         horas[COLH.he100]=XC.he100;
         horas[COLH.noturno]=XC.noturno;
+        horas[12]=num(XC.cfDiasFalta)*HORAS_JORNADA;   // L: dias de falta em horas
         var novoC='';
         Object.keys(celsC).map(Number).sort(function(a,b){ return a-b; }).forEach(function(cn){
           if(cn===COL_NOME){
             novoC+='<c r="A'+nc+'"'+attrEstilo(celsC[cn].attr)+
               ' t="inlineStr"><is><t xml:space="preserve">'+xmlEsc(XC.nome)+'</t></is></c>';
+            return;
+          }
+          if(cn===COL_OBS){
+            novoC+='<c r="'+letraCol(cn)+nc+'"'+attrEstilo(celsC[cn].attr)+'/>';
             return;
           }
           if(horas[cn]!==undefined){
@@ -1385,6 +1443,12 @@ window.baixarExcel=function(){
             novoC+= hv>0
               ? '<c r="'+letraCol(cn)+nc+'"'+est+'><v>'+(Math.round(hv/24*100000000)/100000000)+'</v></c>'
               : '<c r="'+letraCol(cn)+nc+'"'+est+'/>';
+          } else if(COLV[cn]!==undefined){
+            var vv=num(XC[COLV[cn]]);
+            var est2=attrEstilo(celsC[cn].attr) || estC[cn];
+            novoC+= vv!==0
+              ? '<c r="'+letraCol(cn)+nc+'"'+est2+'><v>'+(Math.round(vv*100)/100)+'</v></c>'
+              : '<c r="'+letraCol(cn)+nc+'"'+est2+'/>';
           } else {
             novoC+=celsC[cn].bruto;
           }
@@ -1412,7 +1476,8 @@ window.baixarExcel=function(){
         if(temFormula) continue;
         var lim='';
         Object.keys(cs).map(Number).sort(function(a,b){ return a-b; }).forEach(function(cn){
-          if(cn===COL_NOME || horasCols[cn]) lim+='<c r="'+letraCol(cn)+ns+'"'+attrEstilo(cs[cn].attr)+'/>';
+          if(cn===COL_NOME || horasCols[cn] || COLV[cn]!==undefined)
+            lim+='<c r="'+letraCol(cn)+ns+'"'+attrEstilo(cs[cn].attr)+'/>';
           else lim+=cs[cn].bruto;
         });
         trocasC[ns]='<row r="'+ns+'"'+bs.attr+'>'+lim+'</row>';
