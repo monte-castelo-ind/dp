@@ -140,7 +140,7 @@ tbody tr:hover .stk{background:var(--card-2)}
   <div class="auth-card">
     <div class="auth-logo-box"></div>
     <h1>DP</h1>
-    <p>Fechamento mensal</p>
+    <p>Fechamento mensal pelo ponto</p>
     <input id="authEmail" type="email" autocomplete="username" placeholder="E-mail">
     <input id="authSenha" type="password" autocomplete="current-password" placeholder="Senha">
     <div id="authErro"></div>
@@ -186,13 +186,13 @@ tbody tr:hover .stk{background:var(--card-2)}
     </div>
 
     <div class="page on" id="page-fech">
-      <div class="alert a-info">▤ O PDF traz o que <strong>foi pago</strong> no mês; a planilha de fechamento usa os valores <strong>cheios</strong> de referência. O app converte um no outro e busca na planilha do mês anterior o que o PDF não tem: dependentes, prêmio e a parcela do consignado.</div>
+      <div class="alert a-info">▤ O <strong>espelho de ponto</strong> manda nas horas e nos dias; a <strong>planilha do mês anterior</strong> carrega o que é dinheiro e cadastro — salário, insalubridade, quinquênio, consignado e dependentes. As duas se juntam pelo código do funcionário.</div>
 
       <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
         <div class="drop" id="d-pdf">
           <div class="ico">▦</div>
-          <div class="tit">Extrato Mensal · PDF</div>
-          <div class="sub">Obrigatório. Arquivo da contabilidade, sem abrir nem converter.</div>
+          <div class="tit">Espelho de ponto · PDF</div>
+          <div class="sub">Obrigatório. Arquivo do Símix, sem abrir nem converter.</div>
           <label class="btn btn-sm" style="cursor:pointer;display:inline-block;margin-top:10px">Escolher PDF
             <input type="file" id="f-pdf" accept=".pdf" style="display:none" onchange="lerPDF(this)"></label>
           <div id="s-pdf" style="font-size:11.5px;color:var(--muted);margin-top:8px"></div>
@@ -200,7 +200,7 @@ tbody tr:hover .stk{background:var(--card-2)}
         <div class="drop" id="d-xls">
           <div class="ico">▩</div>
           <div class="tit">Fechamento do mês anterior · Excel</div>
-          <div class="sub">Opcional, mas recomendado. De onde vêm dependentes, prêmio e parcela do consignado.</div>
+          <div class="sub">Obrigatório. De onde vêm salário, insalubridade, quinquênio, consignado e dependentes.</div>
           <label class="btn btn-sm btn-ghost" style="cursor:pointer;display:inline-block;margin-top:10px">Escolher Excel
             <input type="file" id="f-xls" accept=".xlsx,.xls" style="display:none" onchange="lerXLS(this)"></label>
           <div id="s-xls" style="font-size:11.5px;color:var(--muted);margin-top:8px"></div>
@@ -282,7 +282,7 @@ const dbC = getFirestore(appFB);
 const auth = getAuth(appFB);
 
 var pagina='fech', sessaoEmail='', sessaoNome='', ehAdmin=false;
-var FOLHA=null, ANTERIOR=null, LINHAS=[];
+var PONTO=null, ANTERIOR=null, LINHAS=[];
 const TITLES={ fech:['Fechamento','Extrato Mensal em PDF → planilha de fechamento'],
                ajuda:['Como funciona','De onde vem cada coluna'] };
 
@@ -355,6 +355,123 @@ function carregarZip(){
     document.head.appendChild(s);
   });
 }
+/* ===================================================================
+   Leitor do ESPELHO PONTO (Símix) no navegador.
+
+   Um registro por funcionário: cabeçalho, marcações dia a dia e um
+   bloco de totais com até três colunas de "rótulo  valor".
+
+   As regras de negócio vieram da conferência contra o fechamento de
+   agosto, 154 pessoas:
+     Nº D Trab = 30 − atestado − férias − INSS − licença − inativo   147/154
+     HE 50% / HE 100% = Ext. úteis do espelho                        153/154
+     Ad. noturno                                                     148/154
+   Falta NÃO diminui dia — entra como hora negativa.
+   =================================================================== */
+
+function pNrm(s){
+  return String(s==null?'':s).normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+}
+function pHoras(s){
+  var m=String(s==null?'':s).trim().match(/^([+\-]?)(\d{1,4}):(\d{2})$/);
+  if(!m) return 0;
+  return (m[1]==='-'?-1:1)*(parseInt(m[2],10)+parseInt(m[3],10)/60);
+}
+function pHHMM(dec){
+  if(!(Math.abs(dec)>0.0001)) return '';
+  var t=Math.round(Math.abs(dec)*60);
+  return (dec<0?'-':'')+Math.floor(t/60)+':'+String(t%60).padStart(2,'0');
+}
+// "rótulo   valor" — até três pares por linha do bloco de totais
+var P_PAR=/([A-Za-zÀ-ú][A-Za-zÀ-ú0-9./%\s]{2,28}?)\s{2,}([+\-]?\d{1,4}:\d{2}|\d{1,3})(?=\s{2,}|\s*$)/g;
+
+function lerEspelhos(linhas){
+  var texto=linhas.join('\n');
+  // o pdf.js reconstrói com espaços à esquerda e depois dos dois pontos —
+  // os regexes precisam tolerar os dois, senão nenhum registro é montado
+  var blocos=texto.split(/(?=^\s*C[óo]digo:\s*\d)/m);
+  var out=[];
+  blocos.forEach(function(p){
+    var mn=p.match(/^\s*Nome:\s*(.+?)\s{2,}/m);
+    if(!mn) return;
+    var f={
+      nome: mn[1].trim(),
+      codigo:    (p.match(/^\s*C[óo]digo:\s*(\d+)/m)||['',''])[1],
+      matricula: (p.match(/C[óo]d\.\s*Folha:\s*(\d+)/)||['',''])[1],
+      cpf:       (p.match(/^\s*CPF:\s*([\d.\-]+)/m)||['',''])[1],
+      admissao:  (p.match(/Admiss[ãa]o:\s*([\d\/]+)/)||['',''])[1],
+      periodo:   (p.match(/Periodo:\s*([\d\/]+)/)||['',''])[1],
+      cargo:     ((p.match(/^\s*Cargo:\s*(.+?)\s*$/m)||['',''])[1]||'').trim()
+    };
+
+    // bloco de totais
+    var campos={};
+    var mb=p.match(/Horas trabalhadas[\s\S]{0,900}?(?:Confirmo|_{5,})/);
+    if(mb){
+      mb[0].split('\n').forEach(function(l){
+        P_PAR.lastIndex=0;
+        var m;
+        while((m=P_PAR.exec(l))!==null) campos[pNrm(m[1].trim()).toLowerCase()]=m[2].trim();
+      });
+    }
+    function val(){
+      for(var i=0;i<arguments.length;i++){ if(campos[arguments[i]]!=null) return campos[arguments[i]]; }
+      return '';
+    }
+    f.horasTrab = pHoras(val('horas trabalhadas'));
+    f.horasPrev = pHoras(val('horas previstas'));
+    f.saldo     = pHoras(val('horas de saldo'));
+    f.he50      = pHoras(val('ext.uteis 50%','ext. uteis 50%','extras 50%','ext.uteis 50 %'));
+    f.he100     = pHoras(val('ext.uteis 100%','ext. uteis 100%','extras 100%'));
+    f.adNoturno = pHoras(val('ad. noturno','adicional noturno','ad.noturno'));
+
+    // contagem de dias por ocorrência
+    function diasCom(rot){
+      var re=new RegExp('^\\s*\\d{2}\\/\\d{2}\\s+\\S+\\.?\\s.*'+rot,'gm');
+      return (p.match(re)||[]).length;
+    }
+    f.diasFalta   = diasCom('Falta');
+    f.diasAtest   = diasCom('Dia Atestado');
+    f.diasINSS    = diasCom('INSS');
+    f.diasLic     = diasCom('Licen');
+    f.diasInativo = diasCom('Inativo');
+    f.diasFerias  = diasCom('F[ée]rias');
+    f.diasCurso   = diasCom('Curso');
+
+    /* Nº D Trab: falta não tira dia (o DP lança integral e desconta a hora).
+       Só saem os dias que a empresa não paga como trabalhados. */
+    f.diasTrab = Math.max(0, 30 - f.diasAtest - f.diasFerias - f.diasINSS - f.diasLic - f.diasInativo);
+
+    // horas de falta = todo saldo negativo do mês
+    f.horasFalta = f.saldo<0 ? -f.saldo : 0;
+
+    // período de férias, para as colunas de início e fim
+    var dias=[];
+    var reF=/^\s*(\d{2})\/(\d{2})\s+\S+\.?\s.*F[ée]rias/gm, mf;
+    while((mf=reF.exec(p))!==null) dias.push(mf[1]+'/'+mf[2]);
+    f.feriasDe = dias.length?dias[0]:'';
+    f.feriasAte = dias.length?dias[dias.length-1]:'';
+    f.temFerias = dias.length>0;
+    return out.push(f);
+  });
+  return out;
+}
+
+function diagnosticoPonto(linhas){
+  var t=linhas.join('\n');
+  return {
+    linhas: linhas.length,
+    temTitulo: /Espelho\s+Ponto/i.test(t),
+    temNome: (t.match(/^Nome:/gm)||[]).length,
+    temMatricula: (t.match(/C[óo]d\.\s*Folha:/g)||[]).length,
+    temTotais: (t.match(/Horas trabalhadas/g)||[]).length
+  };
+}
+
+if(typeof module!=='undefined' && module.exports){
+  module.exports={ lerEspelhos, diagnosticoPonto, pHoras, pHHMM, pNrm };
+}
+
 // ---------- reconstrução do layout ----------
 // Largura média de caractere na fonte do relatório (Tahoma 6pt no PDF).
 // Serve para transformar distância em número de espaços.
@@ -669,55 +786,6 @@ function conferir(dados) {
 
 
 
-/* ---------- comparação de nomes ---------- */
-var IGNORA={DA:1,DE:1,DO:1,DOS:1,DAS:1,E:1,D:1};
-function tokens(s){
-  var t=String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();
-  return t.replace(/[^A-Z ]/g,' ').split(/\s+/).filter(function(x){ return x.length>1 && !IGNORA[x]; });
-}
-/* Os nomes na planilha são digitados à mão e divergem do PDF: "Adelaide de
-   L.Thomé" contra "ADELAIDE DE LOURDES THOME", "Valmir Martins da Chaga"
-   contra "VALMIR MARTINS DA ROCHA". Comparar texto exato perderia 11 de 161,
-   então a semelhança é medida por tokens em comum.                        */
-function semelhanca(a,b){
-  var A=tokens(a), B=tokens(b);
-  if(!A.length||!B.length) return 0;
-  var setB={}; B.forEach(function(x){ setB[x]=1; });
-  var comuns=0; A.forEach(function(x){ if(setB[x]) comuns++; });
-  var base=Math.max(A.length,B.length);
-  var s=comuns/base;
-  // primeiro nome igual conta a favor: desempata homônimos parciais
-  if(A[0]===B[0]) s+=0.12;
-  return Math.min(1,s);
-}
-/* O casamento tem de ser UM PARA UM: sem isso, a mesma pessoa da planilha
-   era usada por dois registros do PDF e a parcela do consignado entrava em
-   dobro — 165 pares para 161 pessoas no teste.                            */
-function casarNomes(fs, ants){
-  var cand=[];
-  fs.forEach(function(f,i){
-    ants.forEach(function(a,j){
-      var s=semelhanca(f.nome, a.nome);
-      if(s>=0.5) cand.push({ i:i, j:j, s:s });
-    });
-  });
-  cand.sort(function(x,y){ return y.s-x.s; });
-  var usadoF={}, usadoA={}, par={};
-  // segundo melhor score de cada registro, para marcar caso duvidoso
-  var seg={};
-  cand.forEach(function(c){
-    if(seg[c.i]===undefined) seg[c.i]=null;
-    else if(seg[c.i]===null) seg[c.i]=c.s;
-  });
-  cand.forEach(function(c){
-    if(usadoF[c.i]||usadoA[c.j]) return;
-    usadoF[c.i]=1; usadoA[c.j]=1;
-    par[c.i]={ item:ants[c.j], score:c.s, ambiguo:(seg[c.i]!=null && (c.s-seg[c.i])<0.08) };
-  });
-  return par;
-}
-
-/* ---------- leitura do PDF ---------- */
 window.lerPDF=function(input){
   var file=input.files&&input.files[0]; if(!file) return;
   var st=document.getElementById('s-pdf');
@@ -742,7 +810,7 @@ window.lerPDF=function(input){
               return pdf.getPage(n).then(function(pg){ return pg.getTextContent(); })
                 .then(function(t){
                   linhas=linhas.concat(montarLinhas(t.items, lc));
-                  if(n%20===0) st.textContent='Extraindo… '+n+' de '+pdf.numPages;
+                  if(n%25===0) st.textContent='Extraindo… '+n+' de '+pdf.numPages;
                 });
             });
           })(p);
@@ -751,47 +819,29 @@ window.lerPDF=function(input){
       });
     })
     .then(function(linhas){
-      var d=lerFolhaDeLinhas(linhas);
-      if(!d.competencia || !d.funcionarios.length){
+      var esp=lerEspelhos(linhas);
+      if(!esp.length){
         st.textContent='';
         document.getElementById('d-pdf').classList.remove('tem');
-        /* Diagnóstico em vez de recusa seca: sem isto não há como saber se o
-           PDF é outro relatório, se está escaneado ou se o layout mudou. */
-        var txt=linhas.join('\n');
-        var nLinhas=linhas.length;
-        var temTitulo=/EXTRATO MENSAL/i.test(txt);
-        var temEmpr=(txt.match(/^\s*Empr\.?:/gm)||[]).length;
-        var temCompet=/Compet[eê]ncia:/i.test(txt);
-        var temCPF=/\d{3}\.\d{3}\.\d{3}-\d{2}/.test(txt);
-        var pista;
-        if(!nLinhas || !txt.trim())
-          pista='O PDF não tem texto — parece escaneado, e precisaria de OCR.';
-        else if(!temTitulo)
-          pista='Não achei o título "EXTRATO MENSAL". Este parece ser outro relatório da contabilidade.';
-        else if(!temCompet)
-          pista='Achei o título mas não a linha "Competência:".';
-        else if(!temEmpr)
-          pista='Achei o cabeçalho mas nenhum registro "Empr.:" — pode ser só a parte de resumos, sem as páginas dos funcionários.';
-        else
-          pista='Li '+temEmpr+' registro(s) mas não consegui interpretar nenhum. O layout do relatório pode ter mudado.';
-        var amostra=linhas.slice(0,3).map(function(l){ return String(l).trim().slice(0,60); })
-          .filter(Boolean).join(' | ');
-        alert('Não reconheci este PDF como o Extrato Mensal.\n\n'+pista+
-          '\n\n— o que eu encontrei —\n'+
-          'linhas de texto: '+nLinhas+'\n'+
-          'título EXTRATO MENSAL: '+(temTitulo?'sim':'não')+'\n'+
-          'linha Competência: '+(temCompet?'sim':'não')+'\n'+
-          'registros Empr.: '+temEmpr+'\n'+
-          'CPF no texto: '+(temCPF?'sim':'não')+'\n'+
-          (amostra?'\ninício do arquivo:\n'+amostra:''));
-        console.log('diagnóstico do PDF:', { nLinhas:nLinhas, temTitulo:temTitulo, temCompet:temCompet, temEmpr:temEmpr, primeiras:linhas.slice(0,10) });
+        var dg=diagnosticoPonto(linhas);
+        var pista = !dg.linhas ? 'O PDF não tem texto — parece escaneado.'
+          : !dg.temTitulo ? 'Não achei "Espelho Ponto". Este parece ser outro relatório.'
+          : !dg.temNome ? 'Achei o título mas nenhuma linha "Nome:".'
+          : 'Achei '+dg.temNome+' nome(s) mas não consegui montar nenhum registro.';
+        alert('Não reconheci este PDF como o espelho de ponto.\n\n'+pista+
+          '\n\n— o que eu encontrei —\nlinhas: '+dg.linhas+
+          '\ntítulo Espelho Ponto: '+(dg.temTitulo?'sim':'não')+
+          '\nregistros Nome: '+dg.temNome+
+          '\ncom Cód. Folha: '+dg.temMatricula+
+          '\nblocos de totais: '+dg.temTotais);
+        console.log('diagnóstico do ponto:', dg, linhas.slice(0,10));
         return;
       }
-      var ruins=conferir(d);
-      FOLHA=d;
+      PONTO={ espelhos:esp, periodo:(esp[0].periodo||'') };
       document.getElementById('d-pdf').classList.add('tem');
-      st.innerHTML='<strong style="color:var(--green)">✓ '+esc(d.competencia)+'</strong> · '+d.funcionarios.length+' registros'+
-        (ruins.length?' · <span style="color:var(--red)">'+ruins.length+' divergência(s)</span>':' · conferência OK');
+      var semMat=esp.filter(function(f){ return !f.matricula; }).length;
+      st.innerHTML='<strong style="color:var(--green)">✓ '+esc(PONTO.periodo)+'</strong> · '+esp.length+' espelho(s)'+
+        (semMat?' · <span style="color:var(--amber)">'+semMat+' sem código</span>':' · todos com código');
       montar();
     })
     .catch(function(e){
@@ -837,18 +887,24 @@ window.lerXLS=function(input){
     }
     var iN=col('NOME'), iDep=col('DEPEND TOTAL','DEPEND'), iDep14=col('DEP. 14 ANOS','DEP 14'),
         iPre=col('PREMIO'), iCons=col('PARCELA CONSIGNADO','CONSIGNADO'), iPS=col('PSAUDE','PSAUDE','PLANO'),
-        iAdi=col('ADIANTAMENTO'), iAdto=col('ADTO');
+        iAdi=col('ADIANTAMENTO'), iAdto=col('ADTO'),
+        iSal=col('SALARIO'), iIns=col('INSAL'), iAdm=col('ADMISSAO'),
+        iCom=col('COMISSAO','COMISSAO'), iCod=col('CODIGO','MATRICULA');
     var pessoas=[];
     for(var k=hi+1;k<rows.length;k++){
       var rr=rows[k]||[];
       var nm=String(rr[iN]||'').trim();
       if(!nm) continue;
       if(tokens(nm).join('')==='TOTAIS'||nm.toUpperCase().indexOf('TOTAIS')===0) continue;
-      pessoas.push({ nome:nm,
+      pessoas.push({ nome:nm, linha:k,
         dep:(iDep>=0?rr[iDep]:''), dep14:(iDep14>=0?rr[iDep14]:''),
         premio:(iPre>=0?rr[iPre]:''), cons:(iCons>=0?num(rr[iCons]):0),
         psaude:(iPS>=0?rr[iPS]:''),
-        adiAnt:(iAdi>=0?num(rr[iAdi]):null), adtoAnt:(iAdto>=0?num(rr[iAdto]):null) });
+        adiAnt:(iAdi>=0?num(rr[iAdi]):null), adtoAnt:(iAdto>=0?num(rr[iAdto]):null),
+        // o dinheiro e o cadastro agora vêm daqui, não mais do extrato
+        salario:(iSal>=0?num(rr[iSal]):0), insal:(iIns>=0?num(rr[iIns]):0),
+        admissao:(iAdm>=0?rr[iAdm]:''), comis:(iCom>=0?num(rr[iCom]):0),
+        codigo:(iCod>=0?String(rr[iCod]||'').trim():'') });
     }
     ANTERIOR={ aba:nome, pessoas:pessoas };
     document.getElementById('d-xls').classList.add('tem');
@@ -862,296 +918,194 @@ window.lerXLS=function(input){
 };
 
 /* ---------- montagem das linhas ---------- */
-function fimDaCompetencia(comp){
-  // "08/2026" -> último dia do mês; é a data em que os quinquênios são contados
-  var p=String(comp||'').split('/');
-  if(p.length!==2) return new Date();
-  var ano=parseInt(p[1],10), mes=parseInt(p[0],10);
-  return new Date(ano, mes, 0, 12);
+/* Duas fontes, dois papéis:
+   ESPELHO DE PONTO — dias, horas, faltas, atestado, férias
+   PLANILHA ANTERIOR — salário, insalubridade, quinquênio, consignado,
+                       dependentes, prêmio, comissão
+   Casam pelo código do funcionário (Cód. Folha do ponto). Sem código na
+   planilha antiga, cai para semelhança de nome.                        */
+var IGNORA={DA:1,DE:1,DO:1,DOS:1,DAS:1,E:1,D:1};
+function tokens(s){
+  var t=String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();
+  return t.replace(/[^A-Z ]/g,' ').split(/\s+/).filter(function(x){ return x.length>1 && !IGNORA[x]; });
 }
-function mesAdmissao(admissao){
-  var p=String(admissao||'').split('/');
-  return p.length===3 ? parseInt(p[1],10) : 0;
+function semelhanca(a,b){
+  var A=tokens(a), B=tokens(b);
+  if(!A.length||!B.length) return 0;
+  var setB={}; B.forEach(function(x){ setB[x]=1; });
+  var c=0; A.forEach(function(x){ if(setB[x]) c++; });
+  var s=c/Math.max(A.length,B.length);
+  if(A[0]===B[0]) s+=0.12;
+  return Math.min(1,s);
 }
-// dd/mm/aaaa -> serial do Excel, para a data sair como data e não como texto
-function serialExcel(admissao){
-  var p=String(admissao||'').split('/');
-  if(p.length!==3) return '';
-  var d=Date.UTC(parseInt(p[2],10), parseInt(p[1],10)-1, parseInt(p[0],10));
-  if(isNaN(d)) return '';
-  return Math.round((d-Date.UTC(1899,11,30))/86400000);
-}
-function quinquenios(admissao, ref){
-  if(!admissao) return 0;
-  var p=String(admissao).split('/');
-  if(p.length!==3) return 0;
-  var d0=new Date(parseInt(p[2],10), parseInt(p[1],10)-1, parseInt(p[0],10), 12);
-  if(isNaN(d0.getTime())) return 0;
-  var anos=ref.getFullYear()-d0.getFullYear();
-  if(ref.getMonth()<d0.getMonth() || (ref.getMonth()===d0.getMonth() && ref.getDate()<d0.getDate())) anos--;
-  return Math.max(0, Math.floor(anos/5));
-}
-function somaVerba(f, alvos, tipo){
-  var s=0;
-  (f.verbas||[]).forEach(function(v){
-    if(tipo && v.tipo!==tipo) return;
-    var d=String(v.descricao||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();
-    for(var i=0;i<alvos.length;i++){ if(d.indexOf(alvos[i])>=0){ s+=num(v.valor); return; } }
-  });
-  return s;
-}
-/* As horas vêm na coluna de referência da verba, em hh:mm — "36:28" são 36h28.
-   Somo por tipo e devolvo tanto o decimal (para cálculo) quanto o hh:mm
-   (para a planilha, no formato em que a contabilidade manda).            */
-function refHoras(ref){
-  // reaproveita o horasDec do parser, que já trata hh:mm
-  var s=String(ref||'');
-  return s.indexOf(':')>=0 ? horasDec(s) : 0;
-}
-function hhmm(dec){
-  if(!(dec>0)) return '';
-  var t=Math.round(dec*60);
-  var hh=Math.floor(t/60), mm=t%60;
-  return hh+':'+String(mm).padStart(2,'0');
-}
-function horasDe(f){
-  var r={ he50:0, he50v:0, he100:0, he100v:0, noturno:0, noturnov:0,
-          dsr:0, faltas:0, faltasv:0, atraso:0 };
-  (f.verbas||[]).forEach(function(v){
-    var d=String(v.descricao||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();
-    var hs=refHoras(v.referencia), val=num(v.valor);
-    // o reflexo em DSR não é hora trabalhada, entra só como valor
-    if(d.indexOf('REFLEXO')>=0 || d.indexOf('DSR')>=0){ r.dsr+=val; return; }
-    if(d.indexOf('HORAS EXTRAS 100')>=0){ r.he100+=hs; r.he100v+=val; return; }
-    if(d.indexOf('HORAS EXTRAS 50')>=0){ r.he50+=hs; r.he50v+=val; return; }
-    if(d.indexOf('ADICIONAL NOTURNO')>=0){ r.noturno+=hs; r.noturnov+=val; return; }
-    if(d.indexOf('HORAS FALTAS')>=0 || d.indexOf('FALTAS PARCIAL')>=0){ r.faltas+=hs; r.faltasv+=val; return; }
-    if(d.indexOf('ATRASO')>=0){ r.atraso+=hs; return; }
-  });
-  r.heTotal=r.he50+r.he100;
-  r.heValor=r.he50v+r.he100v;
-  return r;
-}
-/* ===== COLUNAS DA CONFERÊNCIA FOLHA =====
-   Cada uma foi conferida contra o seu fechamento de agosto, pessoa por
-   pessoa. O acerto medido está no comentário ao lado — as que não fecharam
-   em pelo menos 90% ficam de fora, porque preencher errado é pior que
-   deixar em branco.                                                      */
-function refNum(f, alvos){
-  var s=0;
-  (f.verbas||[]).forEach(function(v){
-    var d=String(v.descricao||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();
-    for(var i=0;i<alvos.length;i++){
-      if(d.indexOf(alvos[i])>=0){
-        var r=String(v.referencia||'');
-        if(r.indexOf(':')>=0){ var p=r.split(':'); s+=(parseInt(p[0],10)||0)+(parseInt(p[1],10)||0)/60; }
-        else s+=num(String(r).replace(',','.'));
-        return;
+function casarPonto(esp, ants){
+  var par={}, usadoA={};
+  // 1ª passada: código igual, que é exato
+  esp.forEach(function(f,i){
+    if(!f.matricula) return;
+    for(var j=0;j<ants.length;j++){
+      if(usadoA[j]) continue;
+      if(ants[j].codigo && String(ants[j].codigo)===String(f.matricula)){
+        par[i]={ item:ants[j], score:1, porCodigo:true }; usadoA[j]=1; return;
       }
     }
   });
-  return s;
-}
-function dadosConferencia(f){
-  var diasAfast=refNum(f,['DIAS AFAST']);
-  return {
-    diasTrab: refNum(f,['DIAS NORMAIS']),                       // 151/160
-    atestado: (diasAfast>0 && diasAfast<=15) ? diasAfast : 0,   // 154/160
-    diasFalta: refNum(f,['DIAS FALTAS']),                       // 142/160
-    sSubst:   somaVerba(f,['SALARIO SUBSTITU'],'P'),            // 159/160
-    sobreAviso: somaVerba(f,['SOBRE AVISO','SOBREAVISO'],'P'),  // 160/160
-    pensao:   somaVerba(f,['PENSAO'],'D'),                      // 160/160
-    premio:   somaVerba(f,['GRATIFICA'],'P'),                   // 150/160
-    emprestimo: somaVerba(f,['CRED. TRAB','CRED TRAB','EMPRESTIMO'],'D'),
-    liquido:  num(f.liquido)                                    // 159/160
-  };
-}
-function pctInsalubridade(f){
-  var pct=0;
-  (f.verbas||[]).forEach(function(v){
-    var d=String(v.descricao||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();
-    var m=d.match(/INSALUB\w*\s*(\d{2})\s*%/);
-    if(m){ var p=parseInt(m[1],10); if(p>pct) pct=p; }
+  // 2ª passada: semelhança de nome, um para um
+  var cand=[];
+  esp.forEach(function(f,i){
+    if(par[i]) return;
+    ants.forEach(function(a,j){
+      if(usadoA[j]) return;
+      var s=semelhanca(f.nome, a.nome);
+      if(s>=0.5) cand.push({i:i,j:j,s:s});
+    });
   });
-  return pct;
+  cand.sort(function(x,y){ return y.s-x.s; });
+  var seg={};
+  cand.forEach(function(c){ if(seg[c.i]===undefined) seg[c.i]=null; else if(seg[c.i]===null) seg[c.i]=c.s; });
+  cand.forEach(function(c){
+    if(par[c.i]||usadoA[c.j]) return;
+    usadoA[c.j]=1;
+    par[c.i]={ item:ants[c.j], score:c.s, porCodigo:false,
+               ambiguo:(seg[c.i]!=null && (c.s-seg[c.i])<0.08) };
+  });
+  return { pares:par, usadoA:usadoA };
 }
+
 window.montar=function(){
   var btn=document.getElementById('b-excel');
-  if(!FOLHA){
-    LINHAS=[];
-    btn.disabled=true;
+  if(!PONTO){
+    LINHAS=[]; btn.disabled=true;
     document.getElementById('kpis').innerHTML='';
     document.getElementById('avisos').innerHTML='';
-    document.getElementById('tbl').innerHTML='<tbody><tr><td class="empty">Escolha o PDF do Extrato Mensal para começar.</td></tr></tbody>';
+    document.getElementById('tbl').innerHTML='<tbody><tr><td class="empty">Escolha o espelho de ponto para começar.</td></tr></tbody>';
     return;
   }
-  var pct=num(document.getElementById('c-pct').value)/100;
-  var baseInsal=num(document.getElementById('c-insal').value);
-  var pctQuinq=num(document.getElementById('c-quinq').value)/100;
-  var ref=fimDaCompetencia(FOLHA.competencia);
   var ants=(ANTERIOR&&ANTERIOR.pessoas)||[];
-  /* A planilha de fechamento não inclui os diretores (pró-labore): eles
-     entram no extrato como "Contr." e não recebem adiantamento. */
-  var incContr=!!(document.getElementById('c-contr')||{}).checked;
-  var incDem=!!(document.getElementById('c-dem')||{}).checked;
-  /* Demitido não entra no fechamento: ele não recebe adiantamento no mês
-     seguinte. São 20 pessoas em agosto — e 180 empregados menos 20 dá
-     exatamente as 160 que a planilha tem. */
-  var pessoas=FOLHA.funcionarios.filter(function(f){
-    if(!incContr && f.tipo_registro==='contribuinte') return false;
-    if(!incDem && String(f.situacao||'').toUpperCase().indexOf('DEMITIDO')>=0) return false;
-    return true;
-  });
-  nDemitidos=FOLHA.funcionarios.filter(function(f){
-    return f.tipo_registro!=='contribuinte' &&
-           String(f.situacao||'').toUpperCase().indexOf('DEMITIDO')>=0;
-  }).length;
+  var esp=PONTO.espelhos;
+  var C=casarPonto(esp, ants);
 
-  var PARES=ants.length? casarNomes(pessoas, ants) : {};
-  LINHAS=pessoas.map(function(f,_i){
-    var pI=pctInsalubridade(f);
-    var nq=quinquenios(f.admissao, ref);
-    var sal=num(f.salario);
-    var insal=pI? Math.round(baseInsal*(pI/20)*100)/100 : 0;
-    var quinq=Math.round(sal*pctQuinq*nq*100)/100;
-    var adto=Math.round(sal*pct*100)/100;
-    var ferias=somaVerba(f,['FERIAS'],'P')>0;
-    var vt=somaVerba(f,['VALE TRANSP'],'D')>0;
-    var pensao=somaVerba(f,['PENSAO'],'D');
-    var psaudePDF=somaVerba(f,['PLANO DE SA'],'D');
-    var comis=somaVerba(f,['COMISSO','COMISSA'],'P');
-
-    var par=PARES[_i]||{ item:null, score:0, ambiguo:false };
-    var A=par.item||null;
+  LINHAS=esp.map(function(f,i){
+    var p=C.pares[i]||{};
+    var A=p.item||null;
+    var sal=A?num(A.salario):0;
+    var adto=Math.round(sal*0.4*100)/100;
     var cons=A?num(A.cons):0;
-    var adi=ferias?0:Math.max(0, Math.round((adto-cons)*100)/100);
-
-    var H=horasDe(f);
-    var CF=dadosConferencia(f);
-    return { nome:f.nome, admissao:f.admissao, salario:sal, insal:insal, quinq:quinq, adto:adto,
-      cfDiasTrab:CF.diasTrab, cfAtestado:CF.atestado, cfDiasFalta:CF.diasFalta,
-      cfSSubst:CF.sSubst, cfSobreAviso:CF.sobreAviso, cfPensao:CF.pensao,
-      cfPremio:CF.premio, cfEmprestimo:CF.emprestimo, cfLiquido:CF.liquido,
-      he50:H.he50, he50v:H.he50v, he100:H.he100, he100v:H.he100v,
-      noturno:H.noturno, noturnov:H.noturnov, faltas:H.faltas, faltasv:H.faltasv,
-      heTotal:H.heTotal, heValor:H.heValor, dsrv:H.dsr,
-      vt:vt?'SIM':'', pensao:pensao, dep14:(A?A.dep14:''), dep:(A?A.dep:''),
-      psaude:(psaudePDF>0?psaudePDF:(A?A.psaude:'')),
-      // PRÊMIO é "SIM" no mês do aniversário de empresa — é a fórmula da
-      // planilha, não um dado herdado: =IF(MONTH(admissão)<>MONTH(fechamento),0,"SIM")
-      premio:(mesAdmissao(f.admissao)===ref.getMonth()+1 ? 'SIM' : 0),
-      ferias:ferias?'sim':'', adi:adi, cons:cons, comis:comis,
-      _novo:!A, _score:par.score, _ambiguo:par.ambiguo, _pctInsal:pI, _nq:nq, _herdado:!!A,
-      _par:(A?A.nome:''),
-      _semAdiAnt:(A && A.adiAnt===0 && num(A.adtoAnt)>0), _adiAnt:(A?A.adiAnt:null),
-      _nq:nq,
-      _situacao:f.situacao||'', _cc:f.ccusto||'' };
+    return {
+      nome:f.nome, codigo:(f.matricula||f.codigo||''), admissao:(A&&A.admissao)||f.admissao,
+      // do ponto
+      diasTrab:f.diasTrab, atestado:f.diasAtest, horasFalta:f.horasFalta,
+      he50:f.he50, he100:f.he100, noturno:f.adNoturno,
+      ferias:f.temFerias?'sim':'', feriasDe:f.feriasDe, feriasAte:f.feriasAte,
+      saldo:f.saldo, diasFaltaPonto:f.diasFalta,
+      // da planilha anterior
+      salario:sal, insal:A?num(A.insal):0, cons:cons, comis:A?num(A.comis):0,
+      dep:(A?A.dep:''), dep14:(A?A.dep14:''), premio:(A?A.premio:''), psaude:(A?A.psaude:''),
+      adto:adto, adi:(f.temFerias?0:Math.max(0,Math.round((adto-cons)*100)/100)),
+      _novo:!A, _porCodigo:!!p.porCodigo, _ambiguo:!!p.ambiguo,
+      _semAdiAnt:(A && A.adiAnt===0 && num(A.adtoAnt)>0), _adiAnt:(A?A.adiAnt:null)
+    };
   });
-  /* A ORDEM NÃO PODE SER ALFABÉTICA. A CONFERÊNCIA FOLHA tem os nomes como
-     texto fixo e as fórmulas casam por número de linha ('DADOS BASE'!C3 com
-     a linha 3 dela). Ordenar alfabeticamente colocava cada pessoa na linha de
-     outra — e cada um era calculado com o salário do vizinho.
-     Então a ordem do mês anterior é mantida e os novos entram no fim.    */
+
+  /* Quem está na planilha anterior e não bateu ponto (diretoria, afastado
+     o mês inteiro) continua na lista — foi o que você definiu. */
+  var soNaPlanilha=[];
+  ants.forEach(function(a,j){
+    if(C.usadoA[j]) return;
+    var sal=num(a.salario);
+    var adto=Math.round(sal*0.4*100)/100;
+    soNaPlanilha.push({
+      nome:a.nome, codigo:a.codigo||'', admissao:a.admissao||'',
+      diasTrab:30, atestado:0, horasFalta:0, he50:0, he100:0, noturno:0,
+      ferias:'', feriasDe:'', feriasAte:'', saldo:0, diasFaltaPonto:0,
+      salario:sal, insal:num(a.insal), cons:num(a.cons), comis:num(a.comis),
+      dep:a.dep, dep14:a.dep14, premio:a.premio, psaude:a.psaude,
+      adto:adto, adi:Math.max(0,Math.round((adto-num(a.cons))*100)/100),
+      _novo:false, _porCodigo:false, _ambiguo:false, _semPonto:true,
+      _semAdiAnt:(a.adiAnt===0 && num(a.adtoAnt)>0), _adiAnt:a.adiAnt
+    });
+  });
+  LINHAS=LINHAS.concat(soNaPlanilha);
+
+  // ordem do mês anterior, para casar linha a linha com a CONFERÊNCIA FOLHA
   if(ants.length){
     var pos={};
-    ants.forEach(function(a,i){ pos[a.nome]=i; });
+    ants.forEach(function(a,i){ pos[String(a.nome)]=i; });
+    var porNome={};
+    Object.keys(C.pares).forEach(function(i){ porNome[esp[i].nome]=C.pares[i].item.nome; });
     LINHAS.forEach(function(x,i){
-      x._ordem = (x._par && pos[x._par]!==undefined) ? pos[x._par] : (1e6+i);
+      var nomeAnt = porNome[x.nome] || (x._semPonto?x.nome:null);
+      x._ordem = (nomeAnt!=null && pos[nomeAnt]!==undefined) ? pos[nomeAnt] : (1e6+i);
     });
     LINHAS.sort(function(a,b){ return a._ordem-b._ordem; });
-  } else {
-    LINHAS.sort(function(a,b){ return String(a.nome).localeCompare(String(b.nome),'pt-BR'); });
   }
 
   btn.disabled=false;
   pintar();
 };
+
 function pintar(){
+  var semPonto=LINHAS.filter(function(x){ return x._semPonto; });
+  var porCodigo=LINHAS.filter(function(x){ return x._porCodigo; }).length;
   var novos=LINHAS.filter(function(x){ return x._novo; });
-  var ambig=LINHAS.filter(function(x){ return x._ambiguo && !x._novo; });
   var semSal=LINHAS.filter(function(x){ return !(x.salario>0); });
-  var somaAdi=0, somaAdto=0, somaCons=0, somaHE=0, somaHEv=0;
-  LINHAS.forEach(function(x){ somaAdi+=x.adi; somaAdto+=x.adto; somaCons+=x.cons; somaHE+=x.heTotal; somaHEv+=x.heValor; });
+  var t=function(k){ var s=0; LINHAS.forEach(function(x){ s+=num(x[k]); }); return s; };
 
   document.getElementById('kpis').innerHTML=[
-    '<div class="card"><div class="klabel">Competência</div><div class="kval">'+esc(FOLHA.competencia)+'</div><div class="khint">'+LINHAS.length+' pessoas</div></div>',
-    '<div class="card"><div class="klabel">Adiantamento</div><div class="kval">'+fmtR$k(somaAdi)+'</div><div class="khint">a pagar</div></div>',
-    '<div class="card"><div class="klabel">ADTO bruto</div><div class="kval">'+fmtR$k(somaAdto)+'</div><div class="khint">antes do consignado</div></div>',
-    '<div class="card"><div class="klabel">Consignado</div><div class="kval">'+fmtR$k(somaCons)+'</div><div class="khint">'+LINHAS.filter(function(x){return x.cons>0;}).length+' pessoa(s)</div></div>',
-    '<div class="card"><div class="klabel">Horas extras</div><div class="kval">'+hhmm(somaHE)+'</div><div class="khint">'+fmtR$k(somaHEv)+' · '+LINHAS.filter(function(x){return x.heTotal>0;}).length+' pessoa(s)</div></div>',
-    '<div class="card"><div class="klabel">Novos no mês</div><div class="kval" style="color:'+(novos.length?'var(--blue)':'')+'">'+novos.length+'</div><div class="khint">sem par no anterior</div></div>'
+    '<div class="card"><div class="klabel">Período</div><div class="kval">'+esc(PONTO.periodo)+'</div><div class="khint">'+LINHAS.length+' pessoas</div></div>',
+    '<div class="card"><div class="klabel">Horas extras</div><div class="kval">'+pHHMM(t('he50')+t('he100'))+'</div><div class="khint">'+LINHAS.filter(function(x){return (x.he50+x.he100)>0;}).length+' pessoa(s)</div></div>',
+    '<div class="card"><div class="klabel">Horas de falta</div><div class="kval" style="color:'+(t('horasFalta')>0?'var(--amber)':'')+'">'+pHHMM(t('horasFalta'))+'</div><div class="khint">saldo negativo do mês</div></div>',
+    '<div class="card"><div class="klabel">Adiantamento</div><div class="kval">'+fmtR$k(t('adi'))+'</div><div class="khint">a pagar</div></div>',
+    '<div class="card"><div class="klabel">Em férias</div><div class="kval">'+LINHAS.filter(function(x){return x.ferias;}).length+'</div><div class="khint">no período</div></div>'
   ].join('');
 
   var av='';
-  if(nDemitidos>0 && !(document.getElementById('c-dem')||{}).checked)
-    av+='<div class="alert a-ok">✓ '+nDemitidos+' demitido(s) fora do fechamento — eles não recebem adiantamento no mês seguinte.</div>';
-  if(!ANTERIOR) av+='<div class="alert a-warn">⚠ Sem a planilha do mês anterior: <strong>dependentes, prêmio e parcela do consignado saem vazios</strong>. O adiantamento fica igual ao ADTO, sem descontar parcela.</div>';
-  if(novos.length && ANTERIOR) av+='<div class="alert a-info">◇ '+novos.length+' pessoa(s) não estavam no fechamento anterior. As colunas herdadas ficam vazias para você preencher: '+
+  if(porCodigo) av+='<div class="alert a-ok">\u2713 '+porCodigo+' pessoa(s) casadas pelo código do funcionário, sem depender do nome.</div>';
+  if(!ANTERIOR) av+='<div class="alert a-warn">\u26a0 Sem a planilha do mês anterior não há salário, insalubridade nem consignado — e não dá para gerar o Excel.</div>';
+  if(semPonto.length) av+='<div class="alert a-info">\u25c7 '+semPonto.length+' pessoa(s) da planilha anterior não bateram ponto. Entraram com 30 dias e sem horas: '+
+    esc(semPonto.slice(0,4).map(function(x){ return x.nome; }).join(', '))+(semPonto.length>4?'…':'')+'</div>';
+  if(novos.length) av+='<div class="alert a-info">\u25c7 '+novos.length+' pessoa(s) do ponto sem par no mês anterior. Salário e consignado ficam vazios: '+
     esc(novos.slice(0,4).map(function(x){ return x.nome; }).join(', '))+(novos.length>4?'…':'')+'</div>';
-  if(ambig.length) av+='<div class="alert a-warn">⚠ '+ambig.length+' nome(s) com par duvidoso no mês anterior. Confira estas linhas antes de usar: '+
-    esc(ambig.slice(0,4).map(function(x){ return x.nome; }).join(', '))+(ambig.length>4?'…':'')+'</div>';
-  if(semSal.length) av+='<div class="alert a-warn">⚠ '+semSal.length+' pessoa(s) sem salário no PDF. Sem ele, ADTO e quinquênio saem zerados: '+
-    esc(semSal.slice(0,4).map(function(x){ return x.nome; }).join(', '))+'</div>';
-  var zeraram=LINHAS.filter(function(x){ return x._semAdiAnt && x.adi>0; });
-  if(zeraram.length) av+='<div class="alert a-info">◇ '+zeraram.length+' pessoa(s) <strong>não receberam adiantamento no mês anterior</strong> e aqui aparecem com valor. '+
-    'O app não sabe o motivo (afastamento, acordo, admissão recente) — confira estas linhas: '+
-    esc(zeraram.slice(0,4).map(function(x){ return x.nome; }).join(', '))+(zeraram.length>4?'…':'')+'</div>';
+  if(semSal.length) av+='<div class="alert a-warn">\u26a0 '+semSal.length+' pessoa(s) sem salário. O ADTO sai zerado para elas.</div>';
   document.getElementById('avisos').innerHTML=av;
 
-  var H='<thead><tr><th class="stk">Nome</th><th>Admissão</th><th class="r">Salário</th><th class="r">Insal</th>'+
-    '<th class="r">Quinq.</th><th class="r">ADTO</th><th>VT</th><th class="r">Pensão</th><th class="r">Dep 14</th>'+
-    '<th class="r">Depend</th><th class="r">P.Saúde</th><th>Prêmio</th><th>Férias</th><th class="r">Adiantamento</th>'+
-    '<th class="r">Consignado</th><th class="r">Comissão</th>'+
-    '<th class="r">HE 50%</th><th class="r">HE 100%</th><th class="r">HE total</th>'+
-    '<th class="r">R$ HE</th><th class="r">Ad. noturno</th><th class="r">Faltas</th></tr></thead><tbody>';
-  var amarelo='background:rgba(245,176,19,.10)';
+  var H='<thead><tr><th class="stk">Nome</th><th>Código</th><th class="r">Dias</th><th class="r">Atest.</th>'+
+    '<th class="r">H. falta</th><th class="r">HE 50%</th><th class="r">HE 100%</th><th class="r">Ad. not.</th>'+
+    '<th>Férias</th><th class="r">Salário</th><th class="r">Insal.</th><th class="r">ADTO</th>'+
+    '<th class="r">Consig.</th><th class="r">Adiant.</th></tr></thead><tbody>';
   LINHAS.forEach(function(x){
-    var estilo=x._novo?' style="background:rgba(75,123,236,.07)"':'';
+    var estilo = x._novo ? ' style="background:rgba(75,123,236,.07)"'
+               : (x._semPonto ? ' style="background:rgba(245,176,19,.06)"' : '');
     H+='<tr'+estilo+'>'+
-      '<td class="stk">'+esc(x.nome)+(x._novo?' <span class="pill p-new">novo</span>':'')+
+      '<td class="stk">'+esc(x.nome)+
+        (x._novo?' <span class="pill p-new">novo</span>':'')+
+        (x._semPonto?' <span class="pill p-warn">sem ponto</span>':'')+
         (x._ambiguo?' <span class="pill p-warn">conferir</span>':'')+'</td>'+
-      '<td class="num">'+esc(x.admissao||'—')+'</td>'+
-      '<td class="r num"'+(x.salario>0?'':' style="color:var(--red)"')+'>'+(x.salario>0?fmtN(x.salario):'—')+'</td>'+
+      '<td class="mono">'+esc(x.codigo||'—')+'</td>'+
+      '<td class="r num">'+x.diasTrab+'</td>'+
+      '<td class="r num">'+(x.atestado||'—')+'</td>'+
+      '<td class="r num"'+(x.horasFalta>0?' style="color:var(--red)"':'')+'>'+(pHHMM(x.horasFalta)||'—')+'</td>'+
+      '<td class="r num">'+(pHHMM(x.he50)||'—')+'</td>'+
+      '<td class="r num"'+(x.he100>0?' style="color:var(--amber);font-weight:600"':'')+'>'+(pHHMM(x.he100)||'—')+'</td>'+
+      '<td class="r num">'+(pHHMM(x.noturno)||'—')+'</td>'+
+      '<td>'+(x.ferias?'<span class="pill p-warn">'+esc(x.feriasDe)+'–'+esc(x.feriasAte)+'</span>':'')+'</td>'+
+      '<td class="r num">'+(x.salario>0?fmtN(x.salario):'<span style="color:var(--red)">—</span>')+'</td>'+
       '<td class="r num">'+(x.insal>0?fmtN(x.insal):'—')+'</td>'+
-      '<td class="r num">'+(x.quinq>0?fmtN(x.quinq):'—')+'</td>'+
       '<td class="r num" style="font-weight:600">'+(x.adto>0?fmtN(x.adto):'—')+'</td>'+
-      '<td>'+(x.vt?'<span class="pill p-ok">SIM</span>':'')+'</td>'+
-      '<td class="r num">'+(x.pensao>0?fmtN(x.pensao):'—')+'</td>'+
-      '<td class="r num"'+(x._herdado?' style="'+amarelo+'"':'')+'>'+esc(x.dep14||'')+'</td>'+
-      '<td class="r num"'+(x._herdado?' style="'+amarelo+'"':'')+'>'+esc(x.dep||'')+'</td>'+
-      '<td class="r num">'+(num(x.psaude)>0?fmtN(num(x.psaude)):esc(x.psaude||''))+'</td>'+
-      '<td'+(x._herdado?' style="'+amarelo+'"':'')+'>'+esc(x.premio||'')+'</td>'+
-      '<td>'+(x.ferias?'<span class="pill p-warn">sim</span>':'')+'</td>'+
-      '<td class="r num" style="font-weight:600'+(x._semAdiAnt&&x.adi>0?';color:var(--amber)':'')+'"'+
-        (x._adiAnt!=null?' title="mês anterior: '+fmtN(x._adiAnt)+'"':'')+'>'+fmtN(x.adi)+'</td>'+
-      '<td class="r num"'+(x._herdado&&x.cons>0?' style="'+amarelo+'"':'')+'>'+(x.cons>0?fmtN(x.cons):'—')+'</td>'+
-      '<td class="r num">'+(x.comis>0?fmtN(x.comis):'—')+'</td>'+
-      '<td class="r num">'+(x.he50>0?hhmm(x.he50):'—')+'</td>'+
-      '<td class="r num"'+(x.he100>0?' style="color:var(--amber);font-weight:600"':'')+'>'+(x.he100>0?hhmm(x.he100):'—')+'</td>'+
-      '<td class="r num" style="font-weight:600">'+(x.heTotal>0?hhmm(x.heTotal):'—')+'</td>'+
-      '<td class="r num">'+(x.heValor>0?fmtN(x.heValor):'—')+'</td>'+
-      '<td class="r num">'+(x.noturno>0?hhmm(x.noturno):'—')+'</td>'+
-      '<td class="r num"'+(x.faltas>0?' style="color:var(--red)"':'')+'>'+(x.faltas>0?hhmm(x.faltas):'—')+'</td></tr>';
+      '<td class="r num">'+(x.cons>0?fmtN(x.cons):'—')+'</td>'+
+      '<td class="r num" style="font-weight:600">'+fmtN(x.adi)+'</td></tr>';
   });
-  var t=function(k){ var s=0; LINHAS.forEach(function(x){ s+=num(x[k]); }); return s; };
-  H+='<tr style="background:var(--card-2);font-weight:700">'+
-    '<td class="stk" style="background:var(--card-2)">TOTAIS · '+LINHAS.length+'</td><td></td>'+
+  H+='<tr style="background:var(--card-2);font-weight:700"><td class="stk" style="background:var(--card-2)">TOTAIS · '+LINHAS.length+'</td>'+
+    '<td></td><td class="r num">'+t('diasTrab')+'</td><td class="r num">'+t('atestado')+'</td>'+
+    '<td class="r num">'+pHHMM(t('horasFalta'))+'</td><td class="r num">'+pHHMM(t('he50'))+'</td>'+
+    '<td class="r num">'+pHHMM(t('he100'))+'</td><td class="r num">'+pHHMM(t('noturno'))+'</td><td></td>'+
     '<td class="r num">'+fmtN(t('salario'))+'</td><td class="r num">'+fmtN(t('insal'))+'</td>'+
-    '<td class="r num">'+fmtN(t('quinq'))+'</td><td class="r num">'+fmtN(t('adto'))+'</td>'+
-    '<td></td><td class="r num">'+fmtN(t('pensao'))+'</td><td></td><td></td><td></td><td></td><td></td>'+
-    '<td class="r num">'+fmtN(t('adi'))+'</td><td class="r num">'+fmtN(t('cons'))+'</td>'+
-    '<td class="r num">'+fmtN(t('comis'))+'</td>'+
-    '<td class="r num">'+hhmm(t('he50'))+'</td>'+
-    '<td class="r num">'+hhmm(t('he100'))+'</td>'+
-    '<td class="r num">'+hhmm(t('heTotal'))+'</td>'+
-    '<td class="r num">'+fmtN(t('heValor'))+'</td>'+
-    '<td class="r num">'+hhmm(t('noturno'))+'</td>'+
-    '<td class="r num">'+hhmm(t('faltas'))+'</td></tr>';
+    '<td class="r num">'+fmtN(t('adto'))+'</td><td class="r num">'+fmtN(t('cons'))+'</td>'+
+    '<td class="r num">'+fmtN(t('adi'))+'</td></tr>';
   document.getElementById('tbl').innerHTML=H+'</tbody>';
-  document.getElementById('psub').textContent=FOLHA.competencia+' · '+LINHAS.length+' pessoas · adiantamento '+fmtR$k(t('adi'));
+  document.getElementById('psub').textContent=PONTO.periodo+' · '+LINHAS.length+' pessoas · adiantamento '+fmtR$k(t('adi'));
 }
 
-/* ---------- Excel no formato do fechamento ---------- */
 /* ===== GRAVAÇÃO CIRÚRGICA NO ARQUIVO DO MÊS ANTERIOR =====
    Tentei duas bibliotecas para regravar o .xlsx e as duas corromperam a
    CONFERÊNCIA FOLHA: uma descartava a Tabela1, a outra gerava XML que o
@@ -1261,7 +1215,7 @@ window.baixarExcel=function(){
     var maxPessoas = limiteLinha>3 ? (limiteLinha-2) : LINHAS.length;
 
     var xml=dec.decode(zip[alvo]);
-    var comp=String(FOLHA.competencia||'').split('/');
+    var comp=String(PONTO.periodo||'').split('/');
     var mes=comp.length===2?parseInt(comp[0],10):1;
     var ano=comp.length===2?parseInt(comp[1],10):new Date().getFullYear();
     var serialB1=Math.round((Date.UTC(ano,mes-1,1)-Date.UTC(1899,11,30))/86400000);
@@ -1294,9 +1248,9 @@ window.baixarExcel=function(){
     for(var k=0;k<total;k++){
       var n=3+k, X=LINHAS[k];
       var base=linhasXml[n];
-      var apoio='';
+      var apoio='', cels={};
       if(base){
-        var cels=celulasDaLinha(base.dentro);
+        cels=celulasDaLinha(base.dentro);
         Object.keys(cels).map(Number).sort(function(a,b){ return a-b; }).forEach(function(cn){
           if(cn>ULTIMA_COL) apoio+=cels[cn].bruto;
         });
@@ -1306,12 +1260,11 @@ window.baixarExcel=function(){
       out+=celula('B'+n, e[2], serialData(X.admissao));
       out+=celula('C'+n, e[3], X.salario>0?X.salario:null);
       out+=celula('D'+n, e[4], X.insal>0?X.insal:null);
-      out+=(X._nq>0
-        ? celula('E'+n, e[5], X.quinq, 'C'+n+'*'+(Math.round(0.04*X._nq*10000)/10000))
-        : celula('E'+n, e[5], null));
+      // quinquênio e VT vêm da planilha anterior: o ponto não tem dinheiro
+      out+=(base&&cels[5]?cels[5].bruto:celula('E'+n, e[5], null));
       out+=celula('F'+n, e[6], X.adto, 'C'+n+'*40%');
-      out+=celula('G'+n, e[7], X.vt||null, null, true);
-      out+=celula('H'+n, e[8], X.pensao>0?X.pensao:null);
+      out+=(base&&cels[7]?cels[7].bruto:celula('G'+n, e[7], null));
+      out+=(base&&cels[8]?cels[8].bruto:celula('H'+n, e[8], null));
       out+=celula('I'+n, e[9], (X.dep14===''||X.dep14==null)?null:X.dep14, null, isNaN(parseFloat(X.dep14)));
       out+=celula('J'+n, e[10], (X.dep===''||X.dep==null)?null:X.dep, null, isNaN(parseFloat(X.dep)));
       out+=celula('K'+n, e[11], num(X.psaude)>0?num(X.psaude):null);
@@ -1322,13 +1275,15 @@ window.baixarExcel=function(){
       out+=celula('N'+n, e[14], X.adi, 'SUM(F'+n+'-O'+n+')');
       out+=celula('O'+n, e[15], X.cons>0?X.cons:null);
       out+=celula('P'+n, e[16], X.comis>0?X.comis:null);
-      out+=celula('Q'+n, e[17], null);
-      out+=celula('R'+n, e[18], null);
+      // início e fim de férias, que o ponto marca dia a dia
+      out+=celula('Q'+n, e[17], X.feriasDe||null, null, true);
+      out+=celula('R'+n, e[18], X.feriasAte||null, null, true);
       var obs=[];
-      if(X._novo) obs.push('novo no mês');
+      if(X._novo) obs.push('novo no mês — preencher salário e consignado');
+      if(X._semPonto) obs.push('não bateu ponto no mês');
       if(X._semAdiAnt && X.adi>0) obs.push('sem adiantamento no mês anterior');
       if(X._ambiguo) obs.push('conferir nome');
-      if(!(X.salario>0)) obs.push('sem salário no extrato');
+      if(!(X.salario>0)) obs.push('sem salário na planilha anterior');
       out+=celula('S'+n, e[19], obs.length?obs.join(' · '):null, null, true);
       var attrLinha=base?base.attr:(linhasXml[3]?linhasXml[3].attr:' spans="1:27"');
       novasLinhas[n]='<row r="'+n+'"'+attrLinha+'>'+out+apoio+'</row>';
@@ -1386,9 +1341,10 @@ window.baixarExcel=function(){
          calculada com o salário de outra — foi o que aconteceu ao tirar os
          20 demitidos: o alinhamento caiu de 160 para 31.               */
       var COLH={ faltas:14, he50:16, he100:18, noturno:20 };   // N, P, R, T
-      // colunas em dias ou dinheiro (valor direto, não fração de dia)
-      var COLV={ 2:'cfDiasTrab', 5:'cfAtestado', 26:'cfSSubst', 27:'cfSobreAviso',
-                 31:'cfPensao', 34:'cfPremio', 37:'cfEmprestimo', 46:'cfLiquido' };
+      // colunas em dias (valor direto, não fração de dia)
+      // do ponto: dias trabalhados e dias de atestado. O resto é dinheiro,
+      // que a planilha anterior já traz na própria linha e não é tocado.
+      var COLV={ 2:'diasTrab', 5:'atestado' };
       // L (12) é dia de falta expresso em horas de jornada (7:20 = 1 dia)
       var HORAS_JORNADA=7+20/60;
       var COL_NOME=1;
@@ -1421,11 +1377,10 @@ window.baixarExcel=function(){
         if(!baseC) continue;
         var celsC=celulasDaLinha(baseC.dentro);
         var horas={};
-        horas[COLH.faltas]=XC.faltas;
+        horas[COLH.faltas]=XC.horasFalta;   // todo saldo negativo do mês
         horas[COLH.he50]=XC.he50;
         horas[COLH.he100]=XC.he100;
         horas[COLH.noturno]=XC.noturno;
-        horas[12]=num(XC.cfDiasFalta)*HORAS_JORNADA;   // L: dias de falta em horas
         var novoC='';
         Object.keys(celsC).map(Number).sort(function(a,b){ return a-b; }).forEach(function(cn){
           if(cn===COL_NOME){
